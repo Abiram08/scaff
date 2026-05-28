@@ -1,0 +1,34 @@
+"""Generated tool implementations for {{ agent_name }}
+
+Each tool is a placeholder function. Replace the TODO comments with
+actual implementation logic before running the agent.
+"""
+
+import json
+from typing import Any
+
+{%- for tool in tools %}
+
+def {{ tool.name }}(
+{%- if tool.parameters %}
+    {%- for param_name, param_info in tool.parameters.items() %}
+    {{ param_name }}: {{ "str" if param_info.type == "string" else "int" if param_info.type == "integer" else "Any" }},
+    {%- endfor %}
+{%- endif %}
+) -> str:
+    """
+    {{ tool.description }}
+
+{%- if tool.parameters %}
+    Args:
+    {%- for param_name, param_info in tool.parameters.items() %}
+        {{ param_name }} ({{ param_info.type }}): {{ param_info.description }}
+    {%- endfor %}
+{%- endif %}
+
+    Returns:
+        Result of the tool execution as a string
+    """
+    # TODO: implement this tool
+    return json.dumps({"tool": "{{ tool.name }}", "status": "not_implemented", "args": locals()})
+{%- endfor %}

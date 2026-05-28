@@ -1,0 +1,13 @@
+{
+  "name": "{{ agent_name }}",
+  "version": "1.0.0",
+  "description": "{{ description }}",
+  "tools": [
+{%- for tool in tools %}
+    {
+      "name": "{{ tool.name }}",
+      "description": "{{ tool.description }}"
+    }{{ "," if not loop.last else "" }}
+{%- endfor %}
+  ]
+}
