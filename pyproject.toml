@@ -4,17 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scaff"
-version = "0.1.0"
-description = "Scaffold ready-to-run AI agent projects from plain English descriptions"
+version = "0.2.0"
+description = "Scaffold ready-to-run AI agent projects from plain English descriptions with advanced token management, analytics, and telemetry"
 readme = "README.md"
 license = { text = "MIT" }
-keywords = ["ai", "agent", "cli", "scaffolding", "openai", "gpt"]
+keywords = ["ai", "agent", "cli", "scaffolding", "openai", "gpt", "token-management", "analytics"]
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.9.0",
     "openai>=1.0.0",
     "rich>=13.0.0",
     "jinja2>=3.0.0",
+    "psutil>=5.9.0",
 ]
 
 [[project.authors]]
@@ -31,6 +32,7 @@ Documentation = "https://github.com/your-repo/scaff#readme"
 
 [project.scripts]
 scaff = "scaff.main:app"
+scaff-json = "scaff.json_mode:main"
 
 [tool.setuptools.package-data]
 scaff = ["templates/*.j2"]

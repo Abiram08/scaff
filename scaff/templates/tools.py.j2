@@ -1,7 +1,7 @@
 """Generated tool implementations for {{ agent_name }}
 
-Each tool is a placeholder function. Replace the TODO comments with
-actual implementation logic before running the agent.
+Each tool has an auto-generated implementation. Tools that use HTTP
+(weather, GitHub, search) require the `requests` library.
 """
 
 import json
@@ -12,23 +12,9 @@ from typing import Any
 def {{ tool.name }}(
 {%- if tool.parameters %}
     {%- for param_name, param_info in tool.parameters.items() %}
-    {{ param_name }}: {{ "str" if param_info.type == "string" else "int" if param_info.type == "integer" else "Any" }},
+    {{ param_name }}: {{ "str" if param_info.type == "string" else "int" if param_info.type == "integer" else "float" if param_info.type == "number" else "bool" if param_info.type == "boolean" else "Any" }},
     {%- endfor %}
 {%- endif %}
 ) -> str:
-    """
-    {{ tool.description }}
-
-{%- if tool.parameters %}
-    Args:
-    {%- for param_name, param_info in tool.parameters.items() %}
-        {{ param_name }} ({{ param_info.type }}): {{ param_info.description }}
-    {%- endfor %}
-{%- endif %}
-
-    Returns:
-        Result of the tool execution as a string
-    """
-    # TODO: implement this tool
-    return json.dumps({"tool": "{{ tool.name }}", "status": "not_implemented", "args": locals()})
+{{ tool._implementation_code }}
 {%- endfor %}

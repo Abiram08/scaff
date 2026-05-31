@@ -1,0 +1,65 @@
+"""FastAPI web server for {{ agent_name }}
+
+Provides a REST API for the generated agent.
+Run with: uvicorn fastapi_app:app --reload
+"""
+
+import os
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from agent import chat
+
+app = FastAPI(
+    title="{{ agent_name.replace('-', ' ').title() }}",
+    description="{{ description }}",
+    version="1.0.0",
+)
+
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ChatResponse(BaseModel):
+    response: str
+
+
+@app.get("/")
+def root() -> dict[str, Any]:
+    return {
+        "agent": "{{ agent_name }}",
+        "description": "{{ description }}",
+        "endpoints": {
+            "chat": "POST /api/chat  - Send a message to the agent",
+            "health": "GET /health  - Health check",
+        },
+    }
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+def chat_endpoint(request: ChatRequest) -> ChatResponse:
+    """Send a message to the agent and get a response."""
+    if not request.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    try:
+        response = chat(request.message)
+        return ChatResponse(response=response)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", "8000"))
+    host = os.environ.get("HOST", "0.0.0.0")
+    uvicorn.run(app, host=host, port=port)

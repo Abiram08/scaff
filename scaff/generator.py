@@ -2,13 +2,50 @@
 
 import json
 import os
+import random
 import re
 import time
+import traceback
 from typing import Any
 
 import openai
 
+from . import cache as scache
+from .config import ScaffConfig
+from .token_counter import TokenCounter
+from .request_enforcer import Mode, ModeRegistry, RequestEnforcer
+from .token_tracker import TokenTracker
+from .session_manager import SessionManager
+from .telemetry import Telemetry
+
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+# Approximate pricing per 1K tokens (USD) for common models
+MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4-turbo": (10.00, 30.00),
+    "gpt-3.5-turbo": (0.50, 1.50),
+}
+DEFAULT_MAX_TOKENS = 4096
+ECONOMY_MAX_TOKENS = 2048
+
+
+def _count_tokens(text: str) -> int:
+    """Estimate token count (~4 chars per token for English text)."""
+    return max(1, len(text) // 4)
+
+
+def _estimate_cost(
+    input_text: str,
+    output_tokens: int,
+    model: str,
+) -> float:
+    """Estimate cost in USD for a request."""
+    pricing = MODEL_PRICING.get(model, (2.50, 10.00))
+    input_cost = (_count_tokens(input_text) / 1000) * pricing[0]
+    output_cost = (output_tokens / 1000) * pricing[1]
+    return round(input_cost + output_cost, 5)
 
 
 def _identifier(value: str, fallback: str = "tool") -> str:
@@ -168,13 +205,23 @@ def _build_system_prompt(strict_json: bool = False) -> str:
         "You are an expert AI agent architect. Given a plain English description of what an AI agent "
         "should do, return a structured JSON object describing the agent's name, system prompt, tools "
         "with their parameters, MCP config, and Python dependencies. "
+        "\n\nIMPORTANT: Tool names determine which auto-implementation is generated."
+        "\n  - Names containing 'search', 'fetch', 'lookup', 'find', 'query' → HTTP GET implementation"
+        "\n  - Names containing 'read', 'load', 'open', 'parse' → file reading implementation"
+        "\n  - Names containing 'write', 'save', 'store', 'log' → file writing implementation"
+        "\n  - Names containing 'send', 'notify', 'alert', 'message' → print/stdout implementation"
+        "\n  - Names containing 'analyze', 'count', 'summarize', 'compute' → data analysis"
+        "\n  - Names containing 'date', 'time', 'schedule' → datetime implementation"
+        "\n  - Names containing 'list', 'display', 'get_' → enumeration implementation"
+        "\n  - Descriptions mentioning 'weather' or 'forecast' → wttr.in weather API"
+        "\n  - Descriptions mentioning 'github', 'issue', 'repo' → GitHub REST API"
+        "\nUse descriptive names that match these patterns for best auto-implementation."
         "\n\nRequired JSON structure: {"
         "\n  'agent_name': 'kebab-case-name',"
         "\n  'description': 'description',"
         "\n  'system_prompt': 'system prompt for the agent',"
         "\n  'tools': [{'name': 'tool_name', 'description': 'desc', 'parameters': {...}}],"
         "\n  'dependencies': ['package1', 'package2'],"
-        "\n  'mcp_config': {'name': 'name', 'version': '1.0.0', 'tools': [...]}"
         "\n}"
         "\n\nReturn ONLY valid JSON, no markdown, no explanation."
     )
@@ -190,12 +237,19 @@ def _request_agent_spec(
     description: str,
     model: str,
     system_prompt: str,
-) -> str:
-    """Request an agent spec from OpenAI and return the raw text response."""
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = 0.7,
+    verbose: bool = False,
+) -> tuple[str, int, dict[str, str]]:
+    """Request an agent spec from OpenAI using streaming.
+
+    Returns (raw_text, exact_token_count, response_headers).
+    Streaming enables real-time token counting and lower perceived latency.
+    """
     response = client.chat.completions.create(
         model=model,
-        max_tokens=4096,
-        temperature=0.1,
+        max_tokens=max_tokens,
+        temperature=temperature,
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -203,13 +257,47 @@ def _request_agent_spec(
                 "content": f"Create an AI agent with the following description:\n\n{description}",
             },
         ],
+        stream=True,
     )
 
-    content = response.choices[0].message.content
-    if not content:
-        raise ValueError("OpenAI returned empty response")
+    # Extract headers before iterating the stream
+    headers = {}
+    try:
+        raw = response._response
+        for k, v in raw.headers.items():
+            if k.startswith("x-ratelimit-"):
+                headers[k] = v
+    except (AttributeError, TypeError):
+        pass
 
-    return content
+    collected_pieces = []
+    char_count = 0
+    exact_tokens = 0
+
+    for chunk in response:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta and delta.content:
+            piece = delta.content
+            collected_pieces.append(piece)
+            char_count += len(piece)
+            if verbose and char_count > 0 and char_count % 160 == 0:
+                estimated = max(1, char_count // 4)
+                print(f"[*] Streaming: ~{estimated} tokens received...", end="\r")
+
+        if hasattr(chunk, 'usage') and chunk.usage:
+            exact_tokens = chunk.usage.completion_tokens or 0
+
+    if verbose and char_count > 0:
+        print()
+
+    content = "".join(collected_pieces)
+    if not content:
+        raise ValueError("OpenAI returned empty response (streaming)")
+
+    # Prefer exact count from API, fall back to char-based estimate
+    output_tokens = exact_tokens if exact_tokens > 0 else max(1, char_count // 4)
+
+    return content, output_tokens, headers
 
 
 def generate_agent_spec(
@@ -217,6 +305,9 @@ def generate_agent_spec(
     model: str = "gpt-4o",
     verbose: bool = False,
     max_retries: int = 3,
+    cheap: bool = False,
+    show_cost: bool = False,
+    no_cache: bool = False,
 ) -> dict[str, Any]:
     """
     Generate an agent specification from a plain English description.
@@ -226,6 +317,9 @@ def generate_agent_spec(
         model: OpenAI model to use (default: gpt-4o)
         verbose: Show generation steps
         max_retries: Maximum number of retries on API failure (default: 3)
+        cheap: Use gpt-4o-mini to save tokens/cost
+        show_cost: Print estimated cost before calling API
+        no_cache: Bypass cache and force a fresh API call
 
     Returns:
         Parsed JSON object with agent configuration
@@ -233,6 +327,20 @@ def generate_agent_spec(
     Raises:
         ValueError: If API key not set, API fails, or response is invalid
     """
+    # Initialize session and token management
+    session_manager = SessionManager()
+    token_counter = TokenCounter()
+    token_tracker = TokenTracker()
+    
+    # Read saved API mode from config (min/medium/max)
+    mode_str = ScaffConfig.get("api_mode", "medium")
+    try:
+        current_mode = Mode(mode_str)
+    except ValueError:
+        current_mode = Mode.MEDIUM
+    mode_config = ModeRegistry.get_config(current_mode)
+    request_enforcer = RequestEnforcer(mode=current_mode)
+    
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise ValueError(
@@ -240,7 +348,67 @@ def generate_agent_spec(
             "export OPENAI_API_KEY='your-key'"
         )
 
+    # Model: --cheap overrides mode, otherwise use mode's model
+    if cheap:
+        model = "gpt-4o-mini"
+    else:
+        model = mode_config.model
+
+    max_tokens = mode_config.max_tokens
+    temperature = mode_config.temperature
+
     client = openai.OpenAI(api_key=api_key)
+
+    full_prompt = _build_system_prompt(strict_json=False)
+    user_message = f"Create an AI agent with the following description:\n\n{description}"
+    input_text = full_prompt + "\n" + user_message
+
+    # Count input tokens with the new token counter
+    input_tokens = token_counter.count_tokens(input_text)
+    estimated_output_tokens = token_counter.estimate_response_tokens(
+        input_tokens, max_tokens
+    )
+    
+    # Check memory limits
+    memory_check = session_manager.check_memory_limit()
+    if memory_check["exceeds_limit"]:
+        raise ValueError(
+            f"Memory limit exceeded ({memory_check['current_mb']:.1f}MB > {memory_check['limit_mb']}MB). "
+            f"Try reducing input size or restart scaff."
+        )
+    
+    # Check request limits
+    try:
+        request_enforcer.check_budget(input_tokens + estimated_output_tokens)
+        request_enforcer.check_rate_limit()
+    except ValueError as e:
+        raise ValueError(f"API limit exceeded: {e}") from e
+
+    # Show cost estimate
+    if show_cost:
+        cost = _estimate_cost(input_text, max_tokens, model)
+        print(f"[i] Mode: {current_mode.value.upper()}")
+        print(f"[i] Model: {model}")
+        print(f"[i] Temperature: {temperature}")
+        print(f"[i] Input: ~{input_tokens} tokens")
+        print(f"[i] Est. output: ~{estimated_output_tokens} tokens")
+        print(f"[i] Est. cost: ${cost:.5f}")
+
+    # Check cache
+    if not no_cache:
+        cached = scache.get(description, model)
+        if cached:
+            try:
+                agent_spec = json.loads(_extract_json(cached))
+                agent_spec = normalize_agent_spec(agent_spec)
+                validate_agent_spec(agent_spec)
+                if verbose:
+                    print(f"[OK] Using cached response ({agent_spec.get('agent_name', 'unknown')})")
+                token_tracker.end_session()
+                return agent_spec
+            except (json.JSONDecodeError, ValueError):
+                if verbose:
+                    print("[!] Cache corrupted, re-fetching...")
 
     if verbose:
         print("[*] Sending description to OpenAI...")
@@ -249,12 +417,34 @@ def generate_agent_spec(
 
     for attempt in range(max_retries):
         try:
-            content = _request_agent_spec(
+            content, output_tokens, headers = _request_agent_spec(
                 client,
                 description,
                 model,
-                _build_system_prompt(strict_json=False),
+                full_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                verbose=verbose,
             )
+
+            # Update rate limiter with real server headers
+            request_enforcer.update_from_headers(headers)
+            
+            # Track this request
+            token_tracker.record_request(
+                session_id=session_manager.session_id,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost=_estimate_cost(input_text, output_tokens, model),
+            )
+            
+            # Record request in enforcer
+            request_enforcer.record_request(input_tokens + output_tokens)
+            session_manager.request_count += 1
+
+            # Cache the successful response
+            scache.set(description, model, content)
 
             try:
                 agent_spec = json.loads(_extract_json(content))
@@ -263,12 +453,26 @@ def generate_agent_spec(
                     print(f"[!] JSON parse failed: {e}")
                     print("[*] Retrying once with stricter JSON prompt...")
 
-                strict_content = _request_agent_spec(
+                strict_prompt = _build_system_prompt(strict_json=True)
+                strict_content, strict_output_tokens, _ = _request_agent_spec(
                     client,
                     description,
                     model,
-                    _build_system_prompt(strict_json=True),
+                    strict_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    verbose=verbose,
                 )
+                token_tracker.record_request(
+                    session_id=session_manager.session_id,
+                    model=model,
+                    input_tokens=input_tokens,
+                    output_tokens=strict_output_tokens,
+                    cost=_estimate_cost(input_text, strict_output_tokens, model),
+                )
+                request_enforcer.record_request(input_tokens + strict_output_tokens)
+                
+                scache.set(description, model, strict_content)
                 try:
                     agent_spec = json.loads(_extract_json(strict_content))
                 except json.JSONDecodeError as strict_error:
@@ -282,21 +486,100 @@ def generate_agent_spec(
 
             if verbose:
                 print(f"[OK] Agent specification generated: {agent_spec.get('agent_name', 'unknown')}")
+                print(f"[i] Tokens used: {input_tokens + output_tokens:,}")
+                print(f"[i] Session: {session_manager.session_id}")
 
+            # End session to persist token tracking
+            token_tracker.end_session()
             return agent_spec
 
-        except openai.APIError as e:
+        except openai.RateLimitError as e:
             last_error = e
+            telemetry = Telemetry()
+            telemetry.report_error(
+                error_type="RateLimitError",
+                error_message=str(e),
+                stack_trace=traceback.format_exc(),
+                context={
+                    "model": model,
+                    "attempt": attempt + 1,
+                    "max_retries": max_retries,
+                },
+            )
+            # Parse server rate limit headers for optimal retry timing
+            server_wait = 0.0
+            try:
+                raw_headers = dict(e.response.headers)
+                request_enforcer.update_from_headers(raw_headers)
+                server_wait = request_enforcer.bucket.estimated_wait()
+            except (AttributeError, KeyError, ValueError, TypeError):
+                pass
             if attempt < max_retries - 1:
-                wait_time = 2 ** attempt
+                wait_time = max(server_wait, min(2 ** attempt * (1 + random.uniform(0, 1)), 60.0))
                 if verbose:
-                    print(f"[!] API error (attempt {attempt + 1}/{max_retries}): {e}")
-                    print(f"[*] Retrying in {wait_time} seconds...")
+                    print(f"[!] Rate limited (attempt {attempt + 1}/{max_retries}): {e}")
+                    print(f"[*] Retrying in {wait_time:.1f} seconds...")
                 time.sleep(wait_time)
             continue
-        except ValueError:
+        except openai.APIError as e:
+            last_error = e
+            
+            # Log error to telemetry
+            telemetry = Telemetry()
+            telemetry.report_error(
+                error_type="OpenAIAPIError",
+                error_message=str(e),
+                stack_trace=traceback.format_exc(),
+                context={
+                    "model": model,
+                    "attempt": attempt + 1,
+                    "max_retries": max_retries,
+                },
+            )
+            
+            if attempt < max_retries - 1:
+                wait_time = min(2 ** attempt * (1 + random.uniform(0, 1)), 60.0)
+                if verbose:
+                    print(f"[!] API error (attempt {attempt + 1}/{max_retries}): {e}")
+                    print(f"[*] Retrying in {wait_time:.1f} seconds...")
+                time.sleep(wait_time)
+            continue
+        except ValueError as e:
+            # Log validation errors
+            telemetry = Telemetry()
+            telemetry.report_error(
+                error_type="ValidationError",
+                error_message=str(e),
+                stack_trace=traceback.format_exc(),
+                context={
+                    "model": model,
+                    "attempt": attempt + 1,
+                },
+            )
+            raise
+        except Exception as e:
+            # Catch any other unexpected errors
+            telemetry = Telemetry()
+            telemetry.report_error(
+                error_type=type(e).__name__,
+                error_message=str(e),
+                stack_trace=traceback.format_exc(),
+                context={"model": model},
+            )
             raise
 
+    # All retries failed
+    telemetry = Telemetry()
+    telemetry.report_error(
+        error_type="MaxRetriesExceeded",
+        error_message=f"Failed to generate agent specification after {max_retries} attempts",
+        context={
+            "model": model,
+            "max_retries": max_retries,
+            "last_error": str(last_error),
+        },
+    )
+    
     raise ValueError(
         f"Failed to generate agent specification after {max_retries} attempts. "
         f"Last error: {last_error}"

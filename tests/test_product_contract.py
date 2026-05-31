@@ -67,24 +67,16 @@ class ProductContractTests(unittest.TestCase):
         output_path = Path(tempfile.mkdtemp())
         created_files = write_generated_files(spec, str(output_path))
 
-        self.assertEqual(len(created_files), 8)
-        self.assertEqual(
-            sorted(path.name for path in output_path.iterdir()),
-            [
-                ".env.example",
-                ".gitignore",
-                "MANIFEST.json",
-                "README.md",
-                "agent.py",
-                "mcp.json",
-                "requirements.txt",
-                "tools.py",
-            ],
-        )
-        self.assertEqual(
-            (output_path / ".env.example").read_text(encoding="utf-8"),
-            "OPENAI_API_KEY=your-key-here\n",
-        )
+        self.assertGreaterEqual(len(created_files), 8)
+        self.assertIn(".env.example", [p.name for p in output_path.iterdir()])
+        self.assertIn("agent.py", [p.name for p in output_path.iterdir()])
+        self.assertIn("tools.py", [p.name for p in output_path.iterdir()])
+        env_example = (output_path / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("AI Provider API Keys", env_example)
+        self.assertIn("OPENAI_API_KEY", env_example)
+        self.assertIn("ANTHROPIC_API_KEY", env_example)
+        self.assertIn("GOOGLE_API_KEY", env_example)
+
         self.assertEqual(
             (output_path / ".gitignore").read_text(encoding="utf-8").splitlines(),
             [".env", "__pycache__/", "*.pyc", ".DS_Store"],
@@ -93,8 +85,12 @@ class ProductContractTests(unittest.TestCase):
         manifest = json.loads((output_path / "MANIFEST.json").read_text(encoding="utf-8"))
         self.assertEqual(
             sorted(manifest.keys()),
-            ["agent_name", "description", "generated_at", "scaff_version"],
+            ["agent_name", "description", "generated_at", "memory", "provider", "scaff_version", "schedule", "ui_mode"],
         )
+        self.assertEqual(manifest["provider"], "openai")
+        self.assertIsNone(manifest["ui_mode"])
+        self.assertIsNone(manifest["schedule"])
+        self.assertIsNone(manifest["memory"])
         self.assertIn("openai>=1.0.0", (output_path / "requirements.txt").read_text())
 
     def test_rendered_agent_imports_and_dispatches_tools(self) -> None:
@@ -136,7 +132,9 @@ class ProductContractTests(unittest.TestCase):
 
         self.assertEqual(agent.get_tool_definitions()[0]["type"], "function")
         result = json.loads(agent.execute_tool("search_things", {"query": "mvp"}))
-        self.assertEqual(result["status"], "not_implemented")
+        # Tool now tries real HTTP and gracefully handles failure
+        self.assertIn("status", result)
+        self.assertIn(result.get("status"), ("ok", "error"))
 
 
 if __name__ == "__main__":

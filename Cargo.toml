@@ -1,0 +1,36 @@
+[package]
+name = "scaff"
+version = "0.2.0"
+edition = "2021"
+description = "Turn plain English into ready-to-run AI agents. No coding required."
+authors = ["scaff contributors"]
+license = "MIT"
+repository = "https://github.com/your-repo/scaff"
+keywords = ["ai", "agent", "cli", "scaffolding", "openai"]
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env", "unicode"] }
+clap_complete = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indicatif = "0.17"
+console = "0.15"
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+md-5 = "0.10"
+dialoguer = "0.11"
+ratatui = "0.26"
+crossterm = "0.27"
+regex = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[[bin]]
+name = "scaff"
+path = "src/main.rs"

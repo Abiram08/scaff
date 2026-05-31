@@ -1,0 +1,109 @@
+"""Conversation memory for {{ agent_name }} using SQLite.
+
+Provides persistent conversation storage so the agent remembers
+previous interactions across restarts.
+"""
+
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+class ConversationMemory:
+    """SQLite-backed conversation memory."""
+
+    def __init__(self, agent_name: str, db_path: str | None = None):
+        self.agent_name = agent_name
+        self.db_path = db_path or Path(__file__).parent / "memory.db"
+        self._init_db()
+
+    def _init_db(self) -> None:
+        """Ensure the database and tables exist."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_name TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tool_calls TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load(self) -> list[dict[str, Any]]:
+        """Load conversation history from the database."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.execute(
+                "SELECT role, content, tool_calls FROM conversations "
+                "WHERE agent_name = ? ORDER BY id",
+                (self.agent_name,),
+            )
+            messages = []
+            for row in cursor.fetchall():
+                role, content, tool_calls_json = row
+                msg = {"role": role, "content": content}
+                if tool_calls_json:
+                    msg["tool_calls"] = json.loads(tool_calls_json)
+                messages.append(msg)
+            return messages
+        finally:
+            conn.close()
+
+    def save(self, messages: list[dict[str, Any]]) -> None:
+        """Save conversation history to the database (full replace)."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.execute(
+                "DELETE FROM conversations WHERE agent_name = ?",
+                (self.agent_name,),
+            )
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                tool_calls = msg.get("tool_calls")
+                conn.execute(
+                    "INSERT INTO conversations (agent_name, role, content, tool_calls, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        self.agent_name,
+                        role,
+                        content,
+                        json.dumps(tool_calls) if tool_calls else None,
+                        datetime.now().isoformat(),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def clear(self) -> None:
+        """Delete all conversations for this agent."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.execute(
+                "DELETE FROM conversations WHERE agent_name = ?",
+                (self.agent_name,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def count_messages(self) -> int:
+        """Return total stored messages for this agent."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM conversations WHERE agent_name = ?",
+                (self.agent_name,),
+            )
+            return cursor.fetchone()[0]
+        finally:
+            conn.close()

@@ -15,8 +15,10 @@ class ScaffConfig:
     DEFAULT_CONFIG = {
         "model": "gpt-4o",
         "output_dir": "./agent-output",
-        "default_dependencies": ["requests", "python-dotenv"],
-        "template_style": "modern",
+        "cheap": False,
+        "cache_enabled": True,
+        "show_cost": False,
+        "default_provider": "openai",
     }
     
     @classmethod

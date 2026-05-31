@@ -50,7 +50,16 @@ Thumbs.db
 .env.local
 .env.*
 
+# Testing
+.pytest_cache/
+*.hypothesis/
+
+# Rust
+target/
+Cargo.lock
+
 # Project specific
 *.log
 agent-output/
 test-output/
+*.pyz
