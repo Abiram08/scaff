@@ -1,0 +1,38 @@
+# Example research questions
+
+These are example questions the Harness Research Agent can answer out of the box.
+
+## Product questions
+
+- "What is the difference between Harness CD canary and blue/green deployments?"
+- "How does Harness GitOps relate to Argo CD?"
+- "What is Continuous Verification in Harness CD, and which observability tools does it integrate with?"
+
+## Best practices
+
+- "What is a good canary percentage sequence for a high-risk financial service?"
+- "How should I design SLIs for a checkout service?"
+- "What is the recommended pattern for secrets across dev/staging/prod in Harness?"
+
+## Migration
+
+- "How do I migrate 40 Jenkins pipelines to Harness?"
+- "What's the recommended way to move from manual `kubectl apply` to Harness CD?"
+
+## Troubleshooting
+
+- "Why might a Harness CI pipeline fail at the Initialize step?"
+- "My build step is being OOM-killed — what should I check?"
+
+## Comparative
+
+- "How does Harness Feature Flags compare to LaunchDarkly for percentage rollouts?"
+- "Harness CCM vs. native AWS Cost Explorer — what is the practical difference?"
+
+## Run them
+
+```bash
+scaff research "What is the difference between Harness CD canary and blue/green deployments?"
+scaff research "How do I migrate 40 Jenkins pipelines to Harness?" --web
+scaff research "What is Continuous Verification in Harness CD?" -o report.md
+```

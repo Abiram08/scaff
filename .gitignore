@@ -1,40 +1,30 @@
 # scaff
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+# Rust
+target/
+**/*.rs.bk
+
+# Node / Web UI
+node_modules/
+web/dist/
+web/node_modules/
+web/package-lock.json
+
+# Python / Relay backend
+**/__pycache__/
+*.pyc
+*.pyo
 *.egg-info/
-.installed.cfg
 *.egg
+relay/corpus/harness.db
 
-# Virtual environments
-venv/
-ENV/
-env/
-.venv/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-*.iml
+# Local config / corpus database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+~/.scaff/
+/corpus/*.local.jsonl
 
 # OS
 .DS_Store
@@ -45,21 +35,18 @@ env/
 ehthumbs.db
 Thumbs.db
 
-# Environment
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.iml
+
+# Env files (do not commit API keys)
 .env
 .env.local
 .env.*
 
-# Testing
-.pytest_cache/
-*.hypothesis/
-
-# Rust
-target/
-Cargo.lock
-
-# Project specific
+# Logs
 *.log
-agent-output/
-test-output/
-*.pyz

@@ -1,1334 +1,804 @@
-use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
-use serde_json::Value;
+use clap::{CommandFactory, Parser, Subcommand};
+use console::style;
 
-use crate::cache::Cache;
-use crate::config::ScaffConfig;
+use crate::config::{self, ScaffConfig};
+use crate::connectors;
+use crate::corpus;
 use crate::display;
-use crate::python_bridge::{self, GenerateRequest};
-use crate::rate_limiter::{Mode, RateLimiter};
-use crate::shell;
-use crate::token_tracker::TokenTracker;
+use crate::history;
+use crate::init;
+use crate::mcp;
+use crate::pipeline::{self, Execution, Source, SourceKind};
+use crate::render;
+use crate::repl;
+use crate::research::{self, ResearchOptions};
+use crate::search::Index;
 
-#[derive(Parser)]
-#[command(name = "scaff", version, about = "Turn plain English into ready-to-run AI agents. No coding required.")]
+#[derive(Parser, Debug, Clone)]
+#[command(
+    name = "scaff",
+    version,
+    about = "Harness Research Agent — cited answers about the Harness platform.",
+    long_about = "scaff is a verticalized deep-research CLI for the Harness platform. \
+                  Ask a question, get a cited Markdown report.\n\
+                  \n  \
+                  Quick start:  scaff \"What is Harness Continuous Delivery?\"\n  \
+                  Setup wizard: scaff setup\n  \
+                  Interactive:   scaff chat\n  \
+                  Diagnostics:   scaff doctor\n\
+                  \n  \
+                  Supports OpenAI, Anthropic, Gemini, Groq, and Ollama providers. \
+                  API keys auto-detected from environment variables.",
+    subcommand_required = false,
+    arg_required_else_help = false,
+)]
 pub struct Cli {
+    /// Provider: openai, anthropic, gemini, groq, ollama.
+    #[arg(short = 'p', long, global = true)]
+    pub provider: Option<String>,
+
+    /// Override the model name.
+    #[arg(short = 'm', long, global = true)]
+    pub model: Option<String>,
+
+    /// Use the cheap / fast model tier.
+    #[arg(short = 'c', long, global = true)]
+    pub cheap: bool,
+
+    /// Show estimated LLM cost after the report is generated.
+    #[arg(long, global = true)]
+    pub show_cost: bool,
+
+    /// Show pipeline stages (plan → search → synthesize → render) as they run.
+    #[arg(long, global = true)]
+    pub stages: bool,
+
+    /// Show the source list before the report body.
+    #[arg(long, global = true)]
+    pub show_sources: bool,
+
+    /// Number of corpus chunks to retrieve per sub-question.
+    #[arg(short = 'k', long, global = true)]
+    pub retrieval_k: Option<usize>,
+
+    /// Disable web fallback.
+    #[arg(long, global = true)]
+    pub no_web: bool,
+
+    /// Write the report to this file instead of stdout.
+    #[arg(short = 'o', long, global = true)]
+    pub output: Option<PathBuf>,
+
+    /// Verbose logging.
+    #[arg(short = 'v', long, global = true)]
+    pub verbose: bool,
+
+    /// The research question (when no subcommand is given).
+    pub question: Option<String>,
+
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
-    /// Create a new AI agent from a description (generate files, run later)
-    Create {
-        /// Plain English description of the AI agent
-        description: String,
-
-        /// Output directory for generated files
-        #[arg(short = 'o', long)]
-        output: Option<String>,
-
-        /// OpenAI model to use
-        #[arg(short = 'm', long)]
-        model: Option<String>,
-
-        /// Show detailed generation steps
-        #[arg(short = 'v', long)]
-        verbose: bool,
-
-        /// Use gpt-4o-mini to save 90% on API costs
-        #[arg(short = 'c', long)]
-        cheap: bool,
-
-        /// Print estimated token usage and cost before calling
-        #[arg(long)]
-        show_cost: bool,
-
-        /// Bypass cache and force a fresh API call
-        #[arg(long)]
-        no_cache: bool,
-
-        /// Show detailed token usage and remaining budget
-        #[arg(short = 't', long)]
-        tokens: bool,
-
-        /// AI provider: openai, anthropic, gemini, ollama
-        #[arg(short = 'p', long)]
-        provider: Option<String>,
-
-        /// Generate web UI: fastapi or streamlit
-        #[arg(long)]
-        ui: Option<String>,
-
-        /// Cron expression for scheduled runs
-        #[arg(long)]
-        schedule: Option<String>,
-
-        /// Conversation memory: sqlite
-        #[arg(long)]
-        memory: Option<String>,
-
-        /// Agent archetype: cli, web-api, chatbot, scheduler, memory
-        #[arg(long, default_value = "cli")]
-        archetype: String,
+    /// Run a research query. Alias for the default form: `scaff "..."`.
+    Ask {
+        /// The research question.
+        question: Vec<String>,
     },
-
-    /// Generate and run an agent in one command
-    Run {
-        /// Plain English description of the AI agent
-        description: String,
-
-        /// Output directory
-        #[arg(short = 'o', long)]
-        output: Option<String>,
-
-        /// OpenAI model
-        #[arg(short = 'm', long)]
-        model: Option<String>,
-
-        /// Use gpt-4o-mini to save 90%
-        #[arg(short = 'c', long)]
-        cheap: bool,
-
-        /// Print estimated cost
-        #[arg(long)]
-        show_cost: bool,
-
-        /// Bypass cache
-        #[arg(long)]
-        no_cache: bool,
-
-        /// Show detailed steps
-        #[arg(short = 'v', long)]
-        verbose: bool,
-
-        /// Show token usage
-        #[arg(short = 't', long)]
-        tokens: bool,
-
-        /// AI provider
-        #[arg(short = 'p', long)]
-        provider: Option<String>,
-
-        /// Web UI mode
-        #[arg(long)]
-        ui: Option<String>,
-
-        /// Cron schedule
-        #[arg(long)]
-        schedule: Option<String>,
-
-        /// Conversation memory
-        #[arg(long)]
-        memory: Option<String>,
+    /// Same as `ask`, but explicit.
+    Research {
+        /// The research question.
+        question: Vec<String>,
     },
-
-    /// Interactive setup wizard for beginners
-    Wizard,
-
-    /// Show ready-to-use example agents
-    Examples,
-
-    /// Test a description without creating files (dry run)
-    Validate {
-        /// Agent description to test
-        description: String,
+    /// Start the interactive REPL with multi-turn research and slash commands.
+    Chat,
+    /// Show past research executions.
+    History {
+        /// Number of recent executions to show.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
     },
-
-    /// Manage scaff settings
+    /// Reprint a saved research report by execution id (or `:n` index from history).
+    Show {
+        id: String,
+    },
+    /// Manage data sources (corpus, web, local files).
+    Connector {
+        #[command(subcommand)]
+        action: ConnectorAction,
+    },
+    /// Initialize a .scaff.yaml project file in the current directory.
+    Init,
+    /// Manage the local corpus.
+    Corpus {
+        #[command(subcommand)]
+        action: CorpusAction,
+    },
+    /// View or change configuration.
     Config {
-        /// Action: show, set, reset
-        action: Option<String>,
-
-        /// Config key to set
-        #[arg(short = 'k', long)]
-        key: Option<String>,
-
-        /// Config value to set
-        #[arg(short = 'v', long)]
-        value: Option<String>,
+        #[command(subcommand)]
+        action: ConfigAction,
     },
-
-    /// Manage response cache
-    Cache {
-        /// Action: status or clear
-        action: Option<String>,
-    },
-
-    /// Show scaff information and statistics
-    Info,
-
-    /// Show token usage statistics
-    Stats {
-        /// Month to show (YYYY-MM format)
-        #[arg(short = 'm', long)]
-        month: Option<String>,
-    },
-
-    /// Set API limiting mode
-    Mode {
-        /// Mode: min, medium, or max
-        mode_name: Option<String>,
-    },
-
-    /// View analytics and performance metrics
-    Analytics {
-        /// Time period: daily, weekly, monthly
-        #[arg(short = 'p', long, default_value = "daily")]
-        period: String,
-
-        /// Filter by model
-        #[arg(short = 'm', long)]
-        model: Option<String>,
-    },
-
-    /// Preview cost across all modes
-    Estimate {
-        /// Agent description to estimate
-        description: String,
-
-        /// Show detailed breakdown
-        #[arg(short = 'v', long)]
-        verbose: bool,
-
-        /// Filter by mode: min, medium, max
-        #[arg(short = 'm', long)]
-        mode: Option<String>,
-    },
-
-    /// View error reports and diagnostics
-    Errors {
-        /// Show recent errors
-        #[arg(short = 'r', long)]
-        recent: bool,
-    },
-
-    /// Show application state and configuration
-    State {
-        /// Reset to defaults
-        #[arg(long)]
-        reset: bool,
-    },
-
-    /// Modify an existing generated agent
-    Edit {
-        /// Agent directory
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: String,
-
-        /// New description
-        #[arg(long)]
-        description: Option<String>,
-
-        /// New system prompt
-        #[arg(long)]
-        system_prompt: Option<String>,
-
-        /// Change AI provider
-        #[arg(short = 'p', long)]
-        provider: Option<String>,
-
-        /// Change web UI mode
-        #[arg(long)]
-        ui: Option<String>,
-
-        /// Change cron schedule
-        #[arg(long)]
-        schedule: Option<String>,
-
-        /// Show detailed regeneration steps
-        #[arg(short = 'v', long)]
-        verbose: bool,
-    },
-
-    /// Generate deployment configs
-    Deploy {
-        /// Agent directory
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: String,
-
-        /// Platform: docker, railway, render, heroku
-        #[arg(short = 'p', long)]
-        platform: Option<String>,
-
-        /// Show detailed output
-        #[arg(short = 'v', long)]
-        verbose: bool,
-    },
-
-    /// Run agent against test prompts
-    Test {
-        /// Test prompts
-        prompt: Vec<String>,
-
-        /// Agent directory
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: String,
-
-        /// File containing test prompts
-        #[arg(short = 'f', long)]
-        prompts: Option<String>,
-
-        /// Show full responses
-        #[arg(short = 'v', long)]
-        verbose: bool,
-    },
-
-    /// Regenerate agent, preserving user changes
-    Upgrade {
-        /// Agent directory
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: String,
-
-        /// Change provider
-        #[arg(short = 'p', long)]
-        provider: Option<String>,
-
-        /// Show what would change without writing
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Show detailed diff output
-        #[arg(short = 'v', long)]
-        verbose: bool,
-    },
-
-    /// Real-time usage monitoring dashboard
-    Monitor {
-        /// Refresh interval in seconds
-        #[arg(short = 'r', long, default_value = "2")]
-        refresh: u64,
-
-        /// Show a single snapshot and exit
-        #[arg(long)]
-        once: bool,
-    },
-
-    /// Interactive REPL for iteratively building agents
-    Shell,
-
-    /// Generate shell completions
+    /// Health check: API keys, corpus, connectors, dependencies.
+    Doctor,
+    /// Interactive first-time setup wizard.
+    Setup,
+    /// Start an MCP stdio server exposing the `research` tool.
+    Mcp,
+    /// Generate shell completions.
     Completions {
-        /// Shell type: bash, zsh, fish, powershell, elvish
         shell: String,
     },
+}
 
-    /// Export token usage data
-    Export {
-        /// Format: json or csv
-        #[arg(short = 'f', long, default_value = "csv")]
-        format: String,
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConnectorAction {
+    /// List configured connectors and their status.
+    List,
+    /// Test a connector by name.
+    Test { name: String },
+    /// Add a local directory of markdown/text files as a connector.
+    AddDir { path: PathBuf },
+}
 
-        /// Output file (default: stdout)
-        #[arg(short = 'o', long)]
-        output: Option<String>,
-
-        /// Session ID to export (default: all)
-        #[arg(short = 's', long)]
-        session: Option<String>,
+#[derive(Subcommand, Debug, Clone)]
+pub enum CorpusAction {
+    /// Show corpus statistics.
+    Status,
+    /// Add chunks from a local JSONL file.
+    Add { path: PathBuf },
+    /// Add chunks from a local directory of .md/.txt/.rst/.adoc files.
+    AddDir { path: PathBuf },
+    /// Crawl a URL and add its content to the corpus.
+    Crawl {
+        url: String,
+        #[arg(long)]
+        source: Option<String>,
+    },
+    /// Download a fresh seed corpus from a URL.
+    Update {
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Remove all chunks from the local corpus.
+    Clear,
+    /// Run a search against the corpus and print the top hits.
+    Search {
+        query: Vec<String>,
+        #[arg(short = 'k', long, default_value_t = 5usize)]
+        k: usize,
     },
 }
 
-pub fn execute(command: Commands) -> Result<(), String> {
-    match command {
-        Commands::Create {
-            description,
-            output,
-            model,
-            verbose,
-            cheap,
-            show_cost,
-            no_cache,
-            tokens,
-            provider,
-            ui,
-            schedule,
-            memory,
-            archetype,
-        } => cmd_create(description, output, model, verbose, cheap, show_cost, no_cache, tokens, provider, ui, schedule, memory, archetype),
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigAction {
+    Show,
+    Set { key: String, value: String },
+    SetKey { provider: String, key: String },
+    Reset,
+}
 
-        Commands::Run {
-            description,
-            output,
-            model,
-            cheap,
-            show_cost,
-            no_cache,
-            verbose,
-            tokens,
-            provider,
-            ui,
-            schedule,
-            memory,
-        } => cmd_run(description, output, model, cheap, show_cost, no_cache, verbose, tokens, provider, ui, schedule, memory),
+pub fn execute(cli: Cli) -> Result<(), String> {
+    // Auto-setup: detect provider, seed corpus on first run
+    if !matches!(&cli.command, Some(Commands::Completions { .. })) {
+        init::auto_setup(true).ok();
+    }
 
-        Commands::Wizard => cmd_wizard(),
-        Commands::Examples => cmd_examples(),
-        Commands::Validate { description } => cmd_validate(description),
-
-        Commands::Config { action, key, value } => {
-            cmd_config(action.unwrap_or_else(|| "show".to_string()), key, value)
+    if cli.command.is_none() {
+        if let Some(q) = cli.question.as_ref() {
+            if q.trim().is_empty() {
+                // bare `scaff` → start the REPL
+                return cmd_chat();
+            }
+            return cmd_research(&cli, q);
         }
+        // bare `scaff` with no args → REPL
+        return cmd_chat();
+    }
 
-        Commands::Cache { action } => {
-            cmd_cache(action.unwrap_or_else(|| "status".to_string()))
+    match cli.command.as_ref().unwrap() {
+        Commands::Ask { question } => {
+            let q = question.join(" ");
+            if q.is_empty() {
+                return Err("Usage: scaff ask <question>".to_string());
+            }
+            cmd_research(&cli, &q)
         }
-
-        Commands::Info => cmd_info(),
-        Commands::Stats { month } => cmd_stats(month),
-        Commands::Mode { mode_name } => cmd_mode(mode_name.unwrap_or_else(|| "medium".to_string())),
-
-        Commands::Analytics { period, model } => {
-            cmd_analytics(period, model)
+        Commands::Research { question } => {
+            let q = question.join(" ");
+            if q.is_empty() {
+                return Err("Usage: scaff research <question>".to_string());
+            }
+            cmd_research(&cli, &q)
         }
-
-        Commands::Estimate { description, verbose, mode } => {
-            cmd_estimate(description, verbose, mode)
+        Commands::Chat => cmd_chat(),
+        Commands::History { limit } => cmd_history(*limit),
+        Commands::Show { id } => cmd_show(id),
+        Commands::Connector { action } => cmd_connector(action.clone()),
+        Commands::Init => cmd_init(),
+        Commands::Corpus { action } => cmd_corpus(action.clone()),
+        Commands::Config { action } => cmd_config(action.clone()),
+        Commands::Setup => cmd_setup(),
+        Commands::Doctor => cmd_doctor(),
+        Commands::Mcp => {
+            mcp::run().map_err(|e| format!("MCP server error: {e}"))?;
+            Ok(())
         }
-
-        Commands::Errors { recent } => cmd_errors(recent),
-        Commands::State { reset } => cmd_state(reset),
-
-        Commands::Edit {
-            dir,
-            description,
-            system_prompt,
-            provider,
-            ui,
-            schedule,
-            verbose,
-        } => cmd_edit(dir, description, system_prompt, provider, ui, schedule, verbose),
-
-        Commands::Deploy { dir, platform, verbose } => {
-            cmd_deploy(dir, platform, verbose)
-        }
-
-        Commands::Test {
-            prompt,
-            dir,
-            prompts,
-            verbose,
-        } => cmd_test(prompt, dir, prompts, verbose),
-
-        Commands::Upgrade {
-            dir,
-            provider,
-            dry_run,
-            verbose,
-        } => cmd_upgrade(dir, provider, dry_run, verbose),
-
-        Commands::Monitor { refresh, once } => cmd_monitor(refresh, once),
-        Commands::Shell => shell::run_repl(),
         Commands::Completions { shell } => cmd_completions(shell),
-        Commands::Export { format, output, session } => cmd_export(format, output, session),
     }
 }
 
-fn resolve_output(output: Option<String>) -> String {
-    output.unwrap_or_else(|| {
-        let config = ScaffConfig::load();
-        config.output_dir.clone()
-    })
+fn cmd_chat() -> Result<(), String> {
+    if !ScaffConfig::config_path().exists() {
+        init::print_welcome();
+    }
+    repl::run().map_err(|e| format!("chat error: {e}"))
 }
 
-fn resolve_provider(provider: Option<String>) -> String {
-    provider.unwrap_or_else(|| {
-        let config = ScaffConfig::load();
-        config.default_provider.clone()
-    })
+fn cmd_history(limit: usize) -> Result<(), String> {
+    let execs = history::list_executions(limit).map_err(|e| format!("history: {e}"))?;
+    if execs.is_empty() {
+        println!("\n  {} no executions yet — try: scaff \"what is Harness CD?\"", style("!").yellow());
+        return Ok(());
+    }
+    display::section("Execution history");
+    for (i, e) in execs.iter().enumerate() {
+        let status = match e.status {
+            pipeline::ExecutionStatus::Succeeded => style("ok").green(),
+            pipeline::ExecutionStatus::Failed => style("fail").red(),
+            pipeline::ExecutionStatus::Running => style("...").yellow(),
+        };
+        let when = e.started_at.format("%Y-%m-%d %H:%M").to_string();
+        let model = if e.model.is_empty() { "?".to_string() } else { e.model.clone() };
+        println!(
+            "  {:>3}. [{}] {}  {}  {}  ${:.4}  {}",
+            i + 1,
+            status,
+            style(&e.id).dim(),
+            style(when).dim(),
+            style(&model).cyan(),
+            e.estimated_cost_usd,
+            truncate(&e.question, 60)
+        );
+    }
+    println!(
+        "\n  {} run `scaff show <id>` to reprint a report",
+        style("→").dim()
+    );
+    Ok(())
 }
 
-fn resolve_model(model: Option<String>, cheap: bool) -> String {
-    if cheap {
-        return "gpt-4o-mini".to_string();
-    }
-    model.unwrap_or_else(|| {
-        let config = ScaffConfig::load();
-        config.model.clone()
-    })
-}
-
-fn budget_alert() {
-    let config = ScaffConfig::load();
-    let mode = Mode::from_str(&config.api_mode);
-    let tracker = TokenTracker::new();
-    let monthly_used = tracker.monthly_tokens_used();
-    let rl = RateLimiter::with_usage(mode, monthly_used);
-    let pct = rl.budget_percent_used();
-
-    if pct >= 90.0 {
-        display::warn(&format!(
-            "Budget critical: {:.0}% of monthly limit used ({} / {} tokens). Switch to 'min' mode.",
-            pct, monthly_used, rl.config.monthly_tokens
-        ));
-    } else if pct >= 75.0 {
-        display::warn(&format!(
-            "Budget warning: {:.0}% of monthly limit used ({} / {} tokens). Consider 'scaff mode min'.",
-            pct, monthly_used, rl.config.monthly_tokens
-        ));
-    } else if pct >= 50.0 {
-        println!("{} Budget: {:.0}% used ({} / {} tokens this month)",
-            console::style("ℹ").cyan(),
-            pct, monthly_used, rl.config.monthly_tokens);
-    }
-}
-
-fn check_api_key() -> Result<(), String> {
-    match std::env::var("OPENAI_API_KEY") {
-        Ok(k) if !k.is_empty() && !k.trim().is_empty() => Ok(()),
-        _ => Err(
-            "You need an OpenAI API key to use scaff.\n\n\
-             1. Go to https://platform.openai.com/api-keys\n\
-             2. Click 'Create new secret key'\n\
-             3. Copy the key (it starts with 'sk-...')\n\
-             4. Set it as an environment variable:\n\n\
-             Mac / Linux:  export OPENAI_API_KEY='sk-...'\n\
-             Windows:      $env:OPENAI_API_KEY = 'sk-...'".to_string(),
-        ),
-    }
-}
-
-fn archetype_map(archetype: &str, ui: &mut Option<String>, schedule: &mut Option<String>, memory: &mut Option<String>) {
-    match archetype {
-        "web-api" => { if ui.is_none() { *ui = Some("fastapi".to_string()); } }
-        "chatbot" => { if ui.is_none() { *ui = Some("streamlit".to_string()); } }
-        "scheduler" => { if schedule.is_none() { *schedule = Some("0 * * * *".to_string()); } }
-        "memory" => { if memory.is_none() { *memory = Some("sqlite".to_string()); } }
-        _ => {}
-    }
-}
-
-fn cmd_create(
-    description: String,
-    output: Option<String>,
-    model: Option<String>,
-    verbose: bool,
-    cheap: bool,
-    show_cost: bool,
-    no_cache: bool,
-    _tokens: bool,
-    provider: Option<String>,
-    mut ui: Option<String>,
-    mut schedule: Option<String>,
-    mut memory: Option<String>,
-    archetype: String,
-) -> Result<(), String> {
-    budget_alert();
-    let provider = resolve_provider(Some(provider.unwrap_or_else(|| {
-        ScaffConfig::load().default_provider.clone()
-    })));
-
-    if provider == "ollama" {
-        // OK no key needed
-    } else {
-        check_api_key()?;
-    }
-
-    if let Some(ref u) = ui {
-        if u != "fastapi" && u != "streamlit" {
-            return Err(format!("Invalid UI mode: {u}. Valid: fastapi, streamlit"));
-        }
-    }
-
-    archetype_map(&archetype, &mut ui, &mut schedule, &mut memory);
-
-    let output = resolve_output(Some(output.unwrap_or_else(|| {
-        ScaffConfig::load().output_dir.clone()
-    })));
-
-    let model = resolve_model(model, cheap);
-
-    let output_path = Path::new(&output);
-    if output_path.exists() {
-        let overwrite = dialoguer::Confirm::new()
-            .with_prompt("Directory exists. Overwrite?")
-            .default(false)
-            .interact()
-            .unwrap_or(false);
-        if !overwrite {
-            println!("Cancelled.");
+fn cmd_show(id: &str) -> Result<(), String> {
+    let id = id.trim_start_matches(':');
+    if let Ok(idx) = id.parse::<usize>() {
+        let execs = history::list_executions(100).map_err(|e| format!("history: {e}"))?;
+        if let Some(e) = execs.get(idx.saturating_sub(1)) {
+            print_execution_report(e);
             return Ok(());
         }
+        return Err(format!("no execution at index {idx}"));
     }
-
-    let spinner = display::create_spinner("Generating your agent...");
-    let req = GenerateRequest {
-        command: "generate_and_write".to_string(),
-        description,
-        model: Some(model),
-        provider: Some(provider),
-        output: Some(output.clone()),
-        ui_mode: ui,
-        schedule,
-        memory,
-        cheap,
-        verbose,
-        show_cost,
-        no_cache,
-    };
-    let response = python_bridge::call_generate(&req)?;
-    spinner.finish_and_clear();
-
-    if response.status == "error" {
-        return Err(response.error.unwrap_or_else(|| "Unknown error".to_string()));
-    }
-
-    display::ok("Agent scaffolded successfully!");
-    println!();
-
-    let files = response.created_files.unwrap_or_default();
-    display::file_tree(Path::new(&output), &files);
-    println!();
-
-    println!("{}", console::style("Next steps:").bold());
-    println!("  1. cd {output}");
-    println!("  2. pip install -r requirements.txt");
-    println!("  3. python agent.py");
-    println!();
-    println!("{}Tip: Try 'scaff run' to do all of this automatically!", console::style("").dim());
-
+    let exec = history::load_execution(id).map_err(|e| format!("load: {e}"))?;
+    print_execution_report(&exec);
     Ok(())
 }
 
-fn cmd_run(
-    description: String,
-    output: Option<String>,
-    model: Option<String>,
-    cheap: bool,
-    show_cost: bool,
-    no_cache: bool,
-    verbose: bool,
-    _tokens: bool,
-    provider: Option<String>,
-    ui: Option<String>,
-    schedule: Option<String>,
-    memory: Option<String>,
-) -> Result<(), String> {
-    budget_alert();
-    let provider = resolve_provider(Some(provider.unwrap_or_else(|| {
-        ScaffConfig::load().default_provider.clone()
-    })));
-
-    if provider != "ollama" {
-        check_api_key()?;
-    }
-
-    let output = resolve_output(output);
-    let model = resolve_model(model, cheap);
-
-    let spinner = display::create_spinner("Generating your agent...");
-    let req = GenerateRequest {
-        command: "generate_and_write".to_string(),
-        description,
-        model: Some(model),
-        provider: Some(provider),
-        output: Some(output.clone()),
-        ui_mode: ui,
-        schedule,
-        memory,
-        cheap,
-        verbose,
-        show_cost,
-        no_cache,
-    };
-    let response = python_bridge::call_generate(&req)?;
-    spinner.finish_and_clear();
-
-    if response.status == "error" {
-        return Err(response.error.unwrap_or_else(|| "Unknown error".to_string()));
-    }
-
-    display::ok("Agent generated!");
-    println!();
-
-    let files = response.created_files.unwrap_or_default();
-    display::file_tree(Path::new(&output), &files);
-    println!();
-
-    // Install deps
-    let req_file = Path::new(&output).join("requirements.txt");
-    if req_file.exists() {
-        println!("{} Installing dependencies...", console::style("*").dim());
-        let status = std::process::Command::new("pip")
-            .args(["install", "-r", &req_file.to_string_lossy()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| format!("Failed to run pip: {e}"))?;
-        if status.success() {
-            display::ok("Dependencies installed");
-        } else {
-            display::warn(&format!("Dependency install had issues. You may need to run: pip install -r {}", req_file.display()));
+fn print_execution_report(exec: &Execution) {
+    if let Some(p) = &exec.report_path {
+        if let Ok(body) = std::fs::read_to_string(p) {
+            print!("{body}");
+            return;
         }
     }
-
-    println!();
-    println!("{} Starting your agent!", console::style("Starting your agent!").cyan().bold());
-    println!("{}", console::style("(Type your request when prompted, or press Ctrl+C to exit)").dim());
-    println!();
-
-    let agent_file = Path::new(&output).join("agent.py");
-    if !agent_file.exists() {
-        return Err("agent.py not found in output directory".to_string());
+    // Fallback: print what we have.
+    if let Some(t) = &exec.tldr {
+        println!("\n## TL;DR\n\n{t}\n");
     }
-
-    let status = std::process::Command::new("python")
-        .arg(&agent_file)
-        .current_dir(&output)
-        .status()
-        .map_err(|e| format!("Failed to run agent: {e}"))?;
-
-    if !status.success() {
-        return Err("Agent exited with error".to_string());
+    if let Some(err) = &exec.error {
+        eprintln!("\n  {} {err}", style("ERROR").red());
     }
-
-    Ok(())
 }
 
-fn cmd_wizard() -> Result<(), String> {
-    println!();
-    println!("{}", console::style("Welcome to scaff!").cyan().bold());
-    println!();
-    println!("I will help you create your first AI agent.");
-    println!("Just answer a few questions to get started.");
-    println!();
-
-    // Step 1: Check API key
-    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    if key.trim().is_empty() {
-        println!("{}", console::style("Step 1: Set up your OpenAI API key").bold());
-        println!();
-        println!(" 1. Go to https://platform.openai.com/api-keys");
-        println!(" 2. Click 'Create new secret key'");
-        println!(" 3. Copy the key (it starts with 'sk-...')");
-        println!(" 4. Set it as an environment variable:");
-        println!();
-        println!("    Mac / Linux:  export OPENAI_API_KEY='sk-...'");
-        println!("    Windows:      $env:OPENAI_API_KEY = 'sk-...'");
-        println!();
-        println!("{}", console::style("Set your API key and run 'scaff wizard' again.").yellow());
-        return Ok(());
-    }
-    display::ok("OpenAI API key found!");
-    println!();
-
-    // Step 2: Description
-    println!("{}", console::style("Step 2: What should your agent do?").bold());
-    println!();
-    println!("Describe what you want in plain English.");
-    println!("For example:");
-    println!("  * \"summarize my emails and flag urgent ones\"");
-    println!("  * \"monitor github issues and auto-label them by priority\"");
-    println!("  * \"check the weather and send me a daily forecast\"");
-    println!();
-
-    let description: String = dialoguer::Input::new()
-        .with_prompt("Describe your agent")
-        .allow_empty(true)
-        .interact_text()
-        .unwrap_or_default();
-
-    let description = if description.trim().is_empty() {
-        println!("{} Let me pick a popular example for you.", console::style("!").yellow());
-        let desc = "summarize my emails and flag urgent ones";
-        println!("Using: \"{desc}\"");
-        println!();
-        desc.to_string()
-    } else {
-        description
-    };
-
-    // Step 3: Output
-    println!("{}", console::style("Step 3: Where should I save it?").bold());
-    println!();
-    let default_output = ScaffConfig::load().output_dir.clone();
-    let output: String = dialoguer::Input::new()
-        .with_prompt("Output directory")
-        .default(default_output)
-        .interact_text()
-        .unwrap_or_else(|_| "./agent-output".to_string());
-    println!();
-
-    // Step 4: Provider
-    println!("{}", console::style("Step 4: Choose your AI provider").bold());
-    println!();
-    println!("  1) OpenAI (GPT-4o - default)");
-    println!("  2) Anthropic (Claude Sonnet 4)");
-    println!("  3) Google (Gemini 2.0 Flash)");
-    println!("  4) Ollama (Local - llama3.2, free, no API key needed)");
-    println!();
-
-    let provider_choice: String = dialoguer::Input::new()
-        .with_prompt("Choose (1, 2, 3, or 4)")
-        .default("1".to_string())
-        .interact_text()
-        .unwrap_or_else(|_| "1".to_string());
-
-    let provider = match provider_choice.trim() {
-        "2" => "anthropic",
-        "3" => "gemini",
-        "4" => "ollama",
-        _ => "openai",
-    };
-    println!("Using: {provider}");
-    println!();
-
-    // Step 5: Run mode
-    println!("{}", console::style("Step 5: How should we run it?").bold());
-    println!();
-    println!("  1) Generate only - save files, I will run them later");
-    println!("  2) Generate and run - do everything now");
-    println!();
-
-    let run_mode: String = dialoguer::Input::new()
-        .with_prompt("Choose (1 or 2)")
-        .default("2".to_string())
-        .interact_text()
-        .unwrap_or_else(|_| "2".to_string());
-
-    println!();
-
-    // Execute
-    let spinner = display::create_spinner("Generating your agent...");
-    let req = GenerateRequest {
-        command: "generate_and_write".to_string(),
-        description,
-        model: None,
-        provider: Some(provider.to_string()),
-        output: Some(output.clone()),
-        ui_mode: None,
-        schedule: None,
-        memory: None,
-        cheap: false,
-        verbose: false,
-        show_cost: false,
-        no_cache: false,
-    };
-    let response = python_bridge::call_generate(&req)?;
-    spinner.finish_and_clear();
-
-    if response.status == "error" {
-        return Err(response.error.unwrap_or_else(|| "Unknown error".to_string()));
-    }
-
-    display::ok("Your agent is ready!");
-    println!();
-
-    let files = response.created_files.unwrap_or_default();
-    display::file_tree(Path::new(&output), &files);
-    println!();
-
-    if run_mode.trim() == "2" {
-        let req_file = Path::new(&output).join("requirements.txt");
-        if req_file.exists() {
-            println!("{} Installing dependencies...", console::style("*").dim());
-            let _ = std::process::Command::new("pip")
-                .args(["install", "-r", &req_file.to_string_lossy()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-        println!();
-        println!("{} Starting your agent!", console::style("Starting your agent!").cyan().bold());
-        println!("{}", console::style("(Type your request or press Ctrl+C to exit)").dim());
-        println!();
-
-        let agent_file = Path::new(&output).join("agent.py");
-        let _ = std::process::Command::new("python")
-            .arg(&agent_file)
-            .current_dir(&output)
-            .status();
-    } else {
-        println!("{}", console::style("Next steps:").bold());
-        println!("  1. cd {output}");
-        println!("  2. pip install -r requirements.txt");
-        println!("  3. python agent.py");
-        println!();
-        println!("{}", console::style("Or just run: scaff run ...").dim());
-        println!();
-    }
-
-    Ok(())
-}
-
-fn cmd_examples() -> Result<(), String> {
-    println!();
-    println!("{}", console::style("Ready-to-Use Example Agents").cyan().bold());
-    println!();
-    println!("Pick one and run the command shown:");
-    println!();
-    let examples = [
-        ("Email assistant", "scaff run \"summarize my emails and flag urgent ones\""),
-        ("Weather bot", "scaff run \"check the weather and tell me if I need an umbrella\""),
-        ("GitHub helper", "scaff run \"monitor github issues and auto-label them by priority\""),
-        ("Code reviewer", "scaff run \"analyze code for security issues\""),
-        ("News curator", "scaff run \"aggregate news from multiple sources\""),
-        ("Meeting assistant", "scaff run \"summarize meeting notes and extract action items\""),
-    ];
-    for (i, (name, cmd)) in examples.iter().enumerate() {
-        println!("  {}. {} {}", i + 1, console::style(name).green().bold(), console::style(cmd).dim());
-    }
-    println!();
-    Ok(())
-}
-
-fn cmd_validate(description: String) -> Result<(), String> {
-    let spinner = display::create_spinner("Testing your description...");
-    let req = GenerateRequest {
-        command: "validate".to_string(),
-        description,
-        model: None,
-        provider: None,
-        output: None,
-        ui_mode: None,
-        schedule: None,
-        memory: None,
-        cheap: false,
-        verbose: false,
-        show_cost: false,
-        no_cache: false,
-    };
-    let response = python_bridge::call_generate(&req)?;
-    spinner.finish_and_clear();
-
-    if response.status == "error" {
-        return Err(response.error.unwrap_or_else(|| "Description validation failed".to_string()));
-    }
-
-    println!();
-    if response.valid.unwrap_or(false) {
-        display::ok("Description works!");
-    } else {
-        display::warn("Description may not work optimally");
-    }
-    println!();
-
-    if let Some(name) = &response.agent_name {
-        display::kv("Agent Name", name);
-    }
-    if let Some(desc) = &response.description {
-        display::kv("Description", desc);
-    }
-    if let Some(count) = response.tool_count {
-        display::kv("Tools", &format!("{count} tool(s)"));
-    }
-    if let Some(deps) = &response.dependencies {
-        display::kv("Dependencies", &deps.join(", "));
-    }
-    println!();
-
-    Ok(())
-}
-
-fn cmd_config(action: String, key: Option<String>, value: Option<String>) -> Result<(), String> {
-    let mut config = ScaffConfig::load();
-
-    match action.as_str() {
-        "show" => {
-            println!();
-            println!("{}", console::style("Current Settings").cyan().bold());
-            println!();
-            println!("  {} = {}", console::style("model").cyan(), config.model);
-            println!("  {} = {}", console::style("output_dir").cyan(), config.output_dir);
-            println!("  {} = {}", console::style("default_provider").cyan(), config.default_provider);
-            println!("  {} = {}", console::style("api_mode").cyan(), config.api_mode);
-            println!("  {} = {}", console::style("cheap").cyan(), config.cheap);
-            println!("  {} = {}", console::style("show_cost").cyan(), config.show_cost);
-            println!("  {} = {}", console::style("template_style").cyan(), config.template_style);
-            for (k, v) in &config.extra {
-                println!("  {} = {}", console::style(k).cyan(), v);
-            }
-            println!();
-            println!("Config file: {}", ScaffConfig::config_path().display());
-            println!();
-        }
-        "set" => {
-            match (key, value) {
-                (Some(k), Some(v)) => {
-                    let parsed: serde_json::Value = serde_json::from_str(&v).unwrap_or(Value::String(v.clone()));
-                    config.set(&k, parsed);
-                    config.save()?;
-                    display::ok(&format!("Set {k} = {v}"));
+fn cmd_connector(action: ConnectorAction) -> Result<(), String> {
+    match action {
+        ConnectorAction::List => {
+            display::section("Connectors");
+            for mut c in connectors::list_default_connectors() {
+                let (status, detail) = connectors::test_connector(&c.name)
+                    .unwrap_or((connectors::ConnectorStatus::Unknown, serde_json::json!({})));
+                c.status = status;
+                c.details = detail;
+                c.last_tested = Some(chrono::Utc::now());
+                let badge = match c.status {
+                    connectors::ConnectorStatus::Healthy => style("HEALTHY").green(),
+                    connectors::ConnectorStatus::Degraded => style("DEGRADED").yellow(),
+                    connectors::ConnectorStatus::Failed => style("FAILED").red(),
+                    connectors::ConnectorStatus::Unknown => style("UNKNOWN").dim(),
+                };
+                let kind = match c.kind {
+                    connectors::ConnectorKind::Corpus => "corpus",
+                    connectors::ConnectorKind::Web => "web",
+                    connectors::ConnectorKind::Local => "local",
+                };
+                println!(
+                    "  {}  [{}]  {} — {}",
+                    badge,
+                    style(kind).cyan(),
+                    style(&c.name).bold(),
+                    c.description
+                );
+                if !c.details.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                    println!("        {}", style(c.details.to_string()).dim());
                 }
-                _ => return Err("set requires --key and --value".to_string()),
             }
+            Ok(())
         }
-        "reset" => {
-            config.reset();
-            config.save()?;
-            display::ok("Reset to defaults");
+        ConnectorAction::Test { name } => {
+            let (status, detail) = connectors::test_connector(&name)
+                .ok_or_else(|| format!("unknown connector: {name}"))?;
+            let badge = match status {
+                connectors::ConnectorStatus::Healthy => style("HEALTHY").green(),
+                connectors::ConnectorStatus::Degraded => style("DEGRADED").yellow(),
+                connectors::ConnectorStatus::Failed => style("FAILED").red(),
+                connectors::ConnectorStatus::Unknown => style("UNKNOWN").dim(),
+            };
+            println!("  {badge}  {name}\n  {}", style(detail.to_string()).dim());
+            Ok(())
         }
-        _ => return Err(format!("Unknown action: {action}. Use: show, set, reset")),
-    }
-
-    Ok(())
-}
-
-fn cmd_cache(action: String) -> Result<(), String> {
-    let cache = Cache::new();
-
-    match action.as_str() {
-        "status" => {
-            let stats = cache.status();
-            println!();
-            println!("{}", console::style("Response Cache").cyan().bold());
-            println!();
-            display::kv("Entries", &stats.entries.to_string());
-            display::kv("Size", &display::fmt_bytes(stats.size_bytes));
-            display::kv("Oldest", &format!("{:.0} hours", stats.oldest_hours));
-            println!();
-            println!("  Cache dir: {}", ScaffConfig::config_dir().join("cache").display());
-            println!();
-        }
-        "clear" => {
-            let count = cache.clear();
-            display::ok(&format!("Cleared {count} cached response(s)"));
-            println!();
-        }
-        _ => return Err(format!("Unknown action: {action}. Use: status, clear")),
-    }
-
-    Ok(())
-}
-
-fn cmd_info() -> Result<(), String> {
-    println!();
-    println!("{}", console::style("scaff - AI Agent Project Scaffolder").cyan().bold());
-    println!();
-    display::kv("Version", env!("CARGO_PKG_VERSION"));
-    display::kv("License", "MIT");
-    println!();
-    println!("{}", console::style("Features:").cyan().bold());
-    println!("  * scaff create - generate a complete agent project");
-    println!("  * scaff run - generate, install deps, and run in one command");
-    println!("  * scaff wizard - guided setup for beginners");
-    println!("  * scaff estimate - preview cost before generating");
-    println!("  * scaff edit - modify existing agents without regeneration");
-    println!("  * scaff shell - interactive REPL for iteratively building agents");
-    println!("  * Web UI output (FastAPI or Streamlit --ui flag)");
-    println!("  * Scheduled agent runs (--schedule flag)");
-    println!("  * Multi-provider support: OpenAI, Anthropic, Gemini, Ollama");
-    println!("  * Response cache to save API tokens");
-    println!("  * Token bucket rate limiter (MIN/MEDIUM/MAX modes)");
-    println!("  * Real-time monitoring dashboard");
-    println!();
-    println!("{}", console::style("Tech Stack:").cyan().bold());
-    println!("  * Rust CLI (frontend)");
-    println!("  * Python (generation backend)");
-    println!("  * OpenAI / Anthropic / Gemini / Ollama (AI providers)");
-    println!();
-    println!("{}", console::style("Configuration:").cyan().bold());
-    println!("  Config file: {}", ScaffConfig::config_path().display());
-    println!();
-
-    Ok(())
-}
-
-fn cmd_stats(month: Option<String>) -> Result<(), String> {
-    let tracker = TokenTracker::new();
-    let config = ScaffConfig::load();
-    let mode = Mode::from_str(&config.api_mode);
-    let monthly_used = tracker.monthly_tokens_used();
-    let rl = RateLimiter::with_usage(mode, monthly_used);
-
-    if let Some(ref m) = month {
-        let parts: Vec<&str> = m.split('-').collect();
-        if parts.len() == 2 {
-            if let (Ok(year), Ok(month_num)) = (parts[0].parse::<i32>(), parts[1].parse::<u32>()) {
-                let stats = tracker.get_monthly_stats_for(year, month_num);
-                println!();
-                println!("{}", console::style(format!("Token Usage — {m}")).bold());
-                println!("  Total tokens: {}", stats.total_tokens);
-                println!("  Total cost: ${:.2}", stats.total_cost);
-                println!("  Sessions: {}", stats.session_count);
-                println!();
-                return Ok(());
+        ConnectorAction::AddDir { path } => {
+            if !path.exists() {
+                return Err(format!("path does not exist: {}", path.display()));
             }
+            let spinner = display::create_spinner(&format!("Indexing {}...", path.display()));
+            let n = crate::local_files::add_directory_to_corpus(&path)
+                .map_err(|e| format!("index: {e}"))?;
+            spinner.finish_and_clear();
+            display::ok(&format!("Indexed {n} chunks from {}", path.display()));
+            Ok(())
         }
-        return Err(format!("Invalid month format: {m}. Use YYYY-MM"));
     }
+}
 
-    let monthly = tracker.get_monthly_stats();
-    let all_time = tracker.get_all_time_stats();
-
-    let budget_bar = budget_bar(rl.budget_percent_used());
-
-    println!();
-    println!("{}", console::style("This Month").cyan().bold());
-    println!("  Tokens:        {}", monthly.total_tokens);
-    println!("  Cost:          ${:.2}", monthly.total_cost);
-    println!("  Sessions:      {}", monthly.session_count);
-    println!("  Daily burn:    {} tokens/day (${:.4}/day)", monthly.daily_burn, monthly.daily_cost);
-    println!();
-    println!("{}", console::style("Projections").cyan().bold());
-    println!("  Est. monthly:  {} tokens (${:.2})", monthly.projected_monthly, monthly.projected_cost);
-    println!();
-    println!("{}", console::style(format!("Budget ({})", mode.as_str().to_uppercase())).cyan().bold());
-    println!("  Limit:         {} tokens (${:.2}/mo)", rl.config.monthly_tokens, rl.config.monthly_cost);
-    println!("  Used:          {} tokens ({:.0}%)", monthly_used, rl.budget_percent_used());
-    println!("  Remaining:     {} tokens", rl.remaining_budget());
-    println!("  {budget_bar}");
-    println!();
-
-    println!("{}", console::style("All-Time").cyan().bold());
-    println!("  Total tokens:  {}", all_time.total_tokens);
-    println!("  Total cost:    ${:.2}", all_time.total_cost);
-    println!("  Sessions:      {}", all_time.total_sessions);
-    println!("  Avg cost/session: ${:.4}", all_time.average_cost_per_session);
-    println!();
-
+fn cmd_init() -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+    init::init_project(&cwd).map_err(|e| format!("init: {e}"))?;
+    display::ok(&format!(
+        "Created {} in {}",
+        init::SCAFF_PROJECT_FILE,
+        cwd.display()
+    ));
+    display::kv("next", "edit .scaff.yaml, then run `scaff connector add-dir ./docs` to index your local docs");
     Ok(())
 }
 
-fn budget_bar(pct: f64) -> String {
-    let filled = ((pct / 100.0) * 20.0).round() as usize;
-    let empty = 20usize.saturating_sub(filled);
-    let bar_filled = console::style("▓".repeat(filled)).green();
-    let bar_empty = console::style("░".repeat(empty)).dim();
-    format!("[{}{}]", bar_filled, bar_empty)
-}
-
-fn cmd_mode(mode_name: String) -> Result<(), String> {
-    let valid = ["min", "medium", "max"];
-    if !valid.contains(&mode_name.as_str()) {
-        return Err(format!("Invalid mode: {mode_name}. Valid: min, medium, max"));
+fn cmd_research(cli: &Cli, question: &str) -> Result<(), String> {
+    let question = question.trim();
+    if question.is_empty() || question.len() < 3 {
+        return Err("Question must be at least 3 characters. Try: scaff \"what is Harness CD?\"".to_string());
+    }
+    if question.len() > 5000 {
+        return Err(format!("Question is too long ({} chars, max 5000)", question.len()));
     }
 
-    let mut config = ScaffConfig::load();
-    config.api_mode = mode_name.clone();
-    config.save()?;
+    let cfg = ScaffConfig::load();
+    let provider = config::resolve_provider(cli.provider.as_deref())?;
+    let api_key = config::require_api_key(provider, &cfg)?;
+    let model = config::resolve_model(
+        provider,
+        cli.model.as_deref().or(Some(&cfg.model)),
+        cli.cheap || cfg.cheap,
+    );
 
-    println!();
-    display::ok(&format!("Mode set to: {}", mode_name.to_uppercase()));
-    println!();
+    let conn = corpus::open_db().map_err(|e| format!("open corpus: {e}"))?;
+    let chunks = corpus::load_all_chunks(&conn).map_err(|e| format!("load corpus: {e}"))?;
+    let index = Index::build(chunks.clone());
 
-    match mode_name.as_str() {
-        "min" => {
-            println!("  Monthly budget: $0.25");
-            println!("  Monthly tokens: 1,000,000");
-            println!("  Model: gpt-4o-mini");
-            println!("  Rate limit: 6 req/min");
-        }
-        "medium" => {
-            println!("  Monthly budget: $1.25");
-            println!("  Monthly tokens: 5,000,000");
-            println!("  Model: gpt-4o");
-            println!("  Rate limit: 12 req/min");
-        }
-        "max" => {
-            println!("  Monthly budget: $5.00");
-            println!("  Monthly tokens: 20,000,000");
-            println!("  Model: gpt-4o");
-            println!("  Rate limit: 30 req/min");
-        }
-        _ => {}
+    if chunks.is_empty() && cli.verbose {
+        eprintln!(
+            "  {} corpus is empty — answers will rely on LLM knowledge",
+            style("warn").yellow()
+        );
     }
-    println!();
 
-    Ok(())
-}
-
-fn cmd_analytics(period: String, _model_filter: Option<String>) -> Result<(), String> {
-    println!();
-    println!("{}", console::style("Analytics & Performance").cyan().bold());
-    println!();
-
-    // In the hybrid approach, analytics data is tracked by the Python backend.
-    // The Rust CLI will read from the shared token_tracker.json.
-    let tracker = TokenTracker::new();
-    let monthly = tracker.get_monthly_stats();
-    let _all_time = tracker.get_all_time_stats();
-
-    match period.as_str() {
-        "daily" => {
-            println!("{}", console::style("Today").bold());
-            println!("  Total tokens: {}", monthly.total_tokens);
-            println!("  Total cost: ${:.4}", monthly.total_cost);
-        }
-        "weekly" => {
-            println!("{}", console::style("This Week").bold());
-            println!("  Total tokens: {}", monthly.total_tokens);
-            println!("  Total cost: ${:.4}", monthly.total_cost);
-        }
-        "monthly" => {
-            println!("{}", console::style("This Month").bold());
-            println!("  API calls: {}", monthly.session_count);
-            println!("  Total tokens: {}", monthly.total_tokens);
-            println!("  Total cost: ${:.4}", monthly.total_cost);
-            if monthly.session_count > 0 {
-                let avg = monthly.total_cost / monthly.session_count as f64;
-                println!("  Avg cost/call: ${:.4}", avg);
-            }
-        }
-        _ => return Err(format!("Invalid period: {period}. Valid: daily, weekly, monthly")),
-    }
-    println!();
-
-    Ok(())
-}
-
-fn cmd_estimate(description: String, verbose: bool, _mode_filter: Option<String>) -> Result<(), String> {
-    let spinner = display::create_spinner("Estimating costs...");
-    let req = GenerateRequest {
-        command: "estimate".to_string(),
-        description,
-        model: None,
-        provider: None,
-        output: None,
-        ui_mode: None,
-        schedule: None,
-        memory: None,
-        cheap: false,
-        verbose,
-        show_cost: false,
-        no_cache: false,
+    let retrieval_k = cli.retrieval_k.unwrap_or(cfg.retrieval_k).max(1);
+    let mut options = ResearchOptions {
+        retrieval_k,
+        web_enabled: !cli.no_web && cfg.web_enabled,
+        max_sub_questions: 4,
+        max_search_queries: 6,
+        model: model.clone(),
+        temperature: 0.3,
+        max_output_tokens: 2048,
+        show_cost: cli.show_cost || cfg.show_cost,
+        on_finding: None,
     };
-    let response = python_bridge::call_generate(&req)?;
+
+    if cli.stages {
+        eprintln!();
+        display::show_stage("plan", "decomposing question into sub-questions");
+    }
+
+    // Hook up progressive finding display.
+    if cli.stages || cli.verbose {
+        options.on_finding = Some(Box::new(move |f: &pipeline::Finding| {
+            eprintln!();
+            display::finding(f);
+        }));
+    }
+
+    let spinner_msg = if cli.stages {
+        "plan → broad_search → verify → synthesize → render".to_string()
+    } else {
+        format!("Researching \"{question}\"...")
+    };
+    let spinner = display::create_spinner(&spinner_msg);
+    let result = research::run_research(question, &cfg, provider, Some(&api_key), &index, &mut options)
+        .map_err(|e| format!("research failed: {e}"))?;
     spinner.finish_and_clear();
 
-    if response.status == "error" {
-        return Err(response.error.unwrap_or_else(|| "Estimate failed".to_string()));
-    }
+    // Build execution record (auto-save to ~/.scaff/reports and executions).
+    let mut exec = Execution::new("research", question);
+    exec.model = model.clone();
+    exec.provider = provider.name.to_string();
+    exec.input_tokens = result.stats.planner_input_tokens + result.stats.synth_input_tokens;
+    exec.output_tokens = result.stats.planner_output_tokens + result.stats.synth_output_tokens;
+    exec.estimated_cost_usd = result.stats.estimated_cost_usd;
+    exec.finished_at = Some(chrono::Utc::now());
+    exec.status = pipeline::ExecutionStatus::Succeeded;
+    exec.tldr = Some(result.tldr.clone());
 
-    println!();
-    if let Some(desc) = &response.description {
-        println!("{}", console::style("Cost Estimate").cyan().bold());
-        println!();
-        println!("  Description: {desc}");
-    }
-    if let Some(tokens) = response.input_tokens {
-        println!("  Full prompt: ~{tokens} tokens (incl. system prompt)");
-    }
-    println!();
+    let mut plan_stage = pipeline::Stage::new("plan");
+    plan_stage.status = pipeline::StageStatus::Ok;
+    plan_stage.finished_at = Some(chrono::Utc::now());
+    plan_stage = plan_stage.detail("sub_questions", result.stats.sub_questions as u64);
+    exec.stages.push(plan_stage);
 
-    if let Some(modes_val) = response.modes {
-        if let Some(modes) = modes_val.as_array() {
-            println!("  {:<8} {:<20} {:<15} {:<15} {:<15}", "Mode", "Model", "Max Tokens", "Input Cost", "Est. Total");
-            println!("  {}", "-".repeat(75));
-            for m in modes {
-                let mode_name = m["mode"].as_str().unwrap_or("?").to_uppercase();
-                let model = m["model"].as_str().unwrap_or("?");
-                let max_tok = m["max_tokens"].as_u64().unwrap_or(0);
-                let input_cost = m["input_cost"].as_f64().unwrap_or(0.0);
-                let total_cost = m["total_cost"].as_f64().unwrap_or(0.0);
-                println!("  {:<8} {:<20} {:<15} ${:<14.5} ${:<14.5}", mode_name, model, max_tok, input_cost, total_cost);
+    let mut search_stage = pipeline::Stage::new("broad_search");
+    search_stage.status = pipeline::StageStatus::Ok;
+    search_stage.finished_at = Some(chrono::Utc::now());
+    search_stage = search_stage.detail("corpus_hits", result.stats.corpus_chunks_retrieved as u64);
+    search_stage = search_stage.detail("web_results", result.stats.web_results_retrieved as u64);
+    search_stage = search_stage.detail("search_queries", result.stats.search_queries as u64);
+    exec.stages.push(search_stage);
+
+    let mut verify_stage = pipeline::Stage::new("verify");
+    verify_stage.status = pipeline::StageStatus::Ok;
+    verify_stage.finished_at = Some(chrono::Utc::now());
+    verify_stage = verify_stage.detail("claims", result.stats.claims_extracted as u64);
+    verify_stage = verify_stage.detail("verified", result.stats.claims_verified as u64);
+    exec.stages.push(verify_stage);
+
+    let mut synth_stage = pipeline::Stage::new("synthesize");
+    synth_stage.status = pipeline::StageStatus::Ok;
+    synth_stage.finished_at = Some(chrono::Utc::now());
+    synth_stage = synth_stage.detail("input_tokens", exec.input_tokens as u64);
+    synth_stage = synth_stage.detail("output_tokens", exec.output_tokens as u64);
+    exec.stages.push(synth_stage);
+
+    let mut render_stage = pipeline::Stage::new("render");
+    render_stage.status = pipeline::StageStatus::Ok;
+    render_stage.duration_ms = result.stats.elapsed_ms;
+    render_stage.finished_at = Some(chrono::Utc::now());
+    exec.stages.push(render_stage);
+
+    let mut sources: Vec<Source> = Vec::new();
+    for (i, h) in result.corpus_hits.iter().enumerate() {
+        sources.push(Source {
+            id: i + 1,
+            title: h.chunk.title.clone(),
+            url: h.chunk.url.clone(),
+            kind: SourceKind::Corpus,
+            score: h.score,
+        });
+    }
+    let offset = result.corpus_hits.len();
+    for (i, w) in result.web_results.iter().enumerate() {
+        sources.push(Source {
+            id: offset + i + 1,
+            title: w.title.clone(),
+            url: w.url.clone(),
+            kind: SourceKind::Web,
+            score: 0.0,
+        });
+    }
+    exec.sources = sources;
+    exec.claims = result.claims.clone();
+    exec.verifications = result.verifications.clone();
+
+    let saved_report = history::save_report(&exec, &result.report).ok();
+    if let Some(p) = &saved_report {
+        exec.report_path = Some(p.display().to_string());
+    }
+    history::save_execution(&exec).ok();
+
+    // Output: stage progress
+    if cli.stages {
+        eprintln!();
+        eprintln!("  {}", style("Pipeline Summary").cyan().bold());
+        for s in &exec.stages {
+            let detail = s.details.iter()
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if detail.is_empty() {
+                display::stage_ok(&s.name, &format!("{} ms", s.duration_ms));
+            } else {
+                display::stage_ok(&s.name, &format!("{} ms — {}", s.duration_ms, detail));
             }
         }
+        eprintln!("  {}  {} — {} sources, {} claims",
+            style("✓").green(),
+            style(&exec.id).dim(),
+            exec.source_count(),
+            exec.claims.len()
+        );
+        eprintln!();
     }
-    println!();
-    println!("{}", console::style("Estimates based on ~4 chars/token. Actual costs may vary.").dim());
-    println!();
 
-    Ok(())
-}
+    if cli.show_sources {
+        print_sources(&result.corpus_hits, &result.web_results);
+    }
 
-fn cmd_errors(recent: bool) -> Result<(), String> {
-    println!();
-    println!("{}", console::style("Error Reports & Diagnostics").cyan().bold());
-    println!();
-
-    if recent {
-        println!("{}", console::style("Recent errors: Check ~/.scaff/ for error logs").dim());
-        println!("  (Full error diagnostics available via the Python backend)");
+    if let Some(path) = &cli.output {
+        std::fs::write(path, &result.report)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        display::ok(&format!("Wrote report to {}", path.display()));
     } else {
-        println!("  Error tracking is handled by the Python backend.");
-        println!("  Run with -v for verbose error output.");
-        println!();
-        println!("{}", console::style("System Information").bold());
-        println!("  Platform: {}", std::env::consts::OS);
-        println!("  Arch: {}", std::env::consts::ARCH);
-        println!("  Rust CLI version: {}", env!("CARGO_PKG_VERSION"));
-    }
-    println!();
-
-    Ok(())
-}
-
-fn cmd_state(reset: bool) -> Result<(), String> {
-    if reset {
-        let mut config = ScaffConfig::load();
-        config.reset();
-        config.save()?;
-        display::ok("Application state reset to defaults");
-        println!();
-        return Ok(());
+        print!("{}", result.report);
     }
 
-    let config = ScaffConfig::load();
-    let tracker = TokenTracker::new();
-    let monthly = tracker.get_monthly_stats();
-
-    println!();
-    println!("{}", console::style("Application State").cyan().bold());
-    println!();
-    println!("{}", console::style("Configuration").bold());
-    println!("  Current mode: {}", config.api_mode);
-    println!("  Default model: {}", config.model);
-    println!("  Default provider: {}", config.default_provider);
-    println!("  Output directory: {}", config.output_dir);
-    println!();
-    println!("{}", console::style("Usage").bold());
-    println!("  Tokens used this month: {}", monthly.total_tokens);
-    println!("  Cost this month: ${:.2}", monthly.total_cost);
-    println!("  Sessions: {}", monthly.session_count);
-    println!();
-
+    if options.show_cost {
+        eprintln!();
+        display::section("Stats");
+        display::kv("model", &options.model);
+        display::kv("provider", provider.name);
+        display::kv("sub-questions", &result.stats.sub_questions.to_string());
+        display::kv("search queries", &result.stats.search_queries.to_string());
+        display::kv("corpus chunks", &result.stats.corpus_chunks_retrieved.to_string());
+        display::kv("web results", &result.stats.web_results_retrieved.to_string());
+        display::kv("claims extracted", &result.stats.claims_extracted.to_string());
+        display::kv("claims verified", &result.stats.claims_verified.to_string());
+        let conf = exec.overall_confidence();
+        display::kv("overall confidence", &format!("{:.0}%", conf * 100.0));
+        display::kv("elapsed", &format!("{} ms", result.stats.elapsed_ms));
+        display::kv("tokens (in/out)", &format!("{} / {}", exec.input_tokens, exec.output_tokens));
+        display::kv("est. cost", &format!("${:.6}", result.stats.estimated_cost_usd));
+    }
     Ok(())
 }
 
-fn cmd_edit(
-    _dir: String,
-    _description: Option<String>,
-    _system_prompt: Option<String>,
-    _provider: Option<String>,
-    _ui: Option<String>,
-    _schedule: Option<String>,
-    _verbose: bool,
-) -> Result<(), String> {
-    println!("[{}] Edit functionality bridges to Python backend.", console::style("*").dim());
-    println!("  Run: scaff create with updated options, or modify spec.json directly.");
-    println!();
-    println!("  For now, the Python backend handles editing.");
-    println!("  Install the Python version for full edit support.");
-    println!();
+fn print_sources(corpus: &[crate::search::SearchHit], web: &[crate::web::WebResult]) {
+    if corpus.is_empty() && web.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!("  {}", style("Sources").cyan().bold());
+    let mut n = 0;
+    for h in corpus {
+        n += 1;
+        eprintln!(
+            "    [{:>2}] score={:>5.2}  {}  {}",
+            n,
+            h.score,
+            style(&h.chunk.title).bold(),
+            style(&h.chunk.url).dim()
+        );
+    }
+    for w in web {
+        n += 1;
+        eprintln!(
+            "    [{:>2}] web  {}  {}",
+            n,
+            style(&w.title).bold(),
+            style(&w.url).dim()
+        );
+    }
+}
 
+fn cmd_corpus(action: CorpusAction) -> Result<(), String> {
+    match action {
+        CorpusAction::Status => {
+            let conn = corpus::open_db().map_err(|e| format!("open corpus: {e}"))?;
+            let s = corpus::stats(&conn).map_err(|e| format!("stats: {e}"))?;
+            let path = corpus::db_path();
+            display::section("Corpus");
+            display::kv("database", &path.display().to_string());
+            display::kv("chunks", &s.total.to_string());
+            display::kv("unique URLs", &s.unique_urls.to_string());
+            display::kv("unique sources", &s.unique_sources.to_string());
+            display::kv("size", &display::fmt_bytes(s.total_bytes));
+            Ok(())
+        }
+        CorpusAction::Add { path } => {
+            let conn = corpus::open_db().map_err(|e| format!("open corpus: {e}"))?;
+            let n = corpus::ingest_seed_path(&conn, &path)
+                .map_err(|e| format!("ingest: {e}"))?;
+            display::ok(&format!("Ingested {n} chunks from {}", path.display()));
+            Ok(())
+        }
+        CorpusAction::AddDir { path } => {
+            if !path.exists() {
+                return Err(format!("path does not exist: {}", path.display()));
+            }
+            let spinner = display::create_spinner(&format!("Indexing {}...", path.display()));
+            let n = crate::local_files::add_directory_to_corpus(&path)
+                .map_err(|e| format!("index: {e}"))?;
+            spinner.finish_and_clear();
+            display::ok(&format!("Indexed {n} chunks from {}", path.display()));
+            Ok(())
+        }
+        CorpusAction::Crawl { url, source } => {
+            let spinner = display::create_spinner(&format!("Crawling {url}..."));
+            let source = source.unwrap_or_else(|| "crawl".to_string());
+            let chunks = corpus::crawl_url(&url, &source)
+                .map_err(|e| format!("crawl: {e}"))?;
+            spinner.finish_and_clear();
+            let conn = corpus::open_db().map_err(|e| format!("open corpus: {e}"))?;
+            let n = corpus::ingest_raw(&conn, &chunks)
+                .map_err(|e| format!("ingest: {e}"))?;
+            display::ok(&format!("Added {n} chunks from {url}"));
+            Ok(())
+        }
+        CorpusAction::Update { url } => {
+            let url = url.unwrap_or_else(|| corpus::DEFAULT_SEED_URL.to_string());
+            let spinner = display::create_spinner(&format!("Downloading seed from {url}..."));
+            let dest = corpus::seed_path();
+            let n = corpus::download_seed(&url, &dest)
+                .map_err(|e| format!("download: {e}"))?;
+            spinner.finish_and_clear();
+            display::ok(&format!("Ingested {n} chunks from {url}"));
+            Ok(())
+        }
+        CorpusAction::Clear => {
+            let conn = corpus::open_db().map_err(|e| format!("open corpus: {e}"))?;
+            let n = corpus::clear(&conn).map_err(|e| format!("clear: {e}"))?;
+            display::ok(&format!("Removed {n} chunks"));
+            Ok(())
+        }
+        CorpusAction::Search { query, k } => {
+            let q = query.join(" ");
+            if q.is_empty() {
+                return Err("Usage: scaff corpus search <query>".to_string());
+            }
+            let conn = corpus::open_db().map_err(|e| format!("open corpus: {e}"))?;
+            let chunks = corpus::load_all_chunks(&conn).map_err(|e| format!("load corpus: {e}"))?;
+            let index = Index::build(chunks);
+            let hits = index.search(&q, k);
+            display::section(&format!("Top {k} hits for \"{q}\""));
+            for (i, h) in hits.iter().enumerate() {
+                println!(
+                    "  {}. score={:.3}  {}",
+                    i + 1,
+                    h.score,
+                    display_kv_color(&h.chunk.title, &h.chunk.url)
+                );
+                if let Some(s) = &h.chunk.section {
+                    println!("     section: {s}");
+                }
+                let snippet = snippet(&h.chunk.content, 160);
+                println!("     {snippet}");
+                println!();
+            }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_config(action: ConfigAction) -> Result<(), String> {
+    match action {
+        ConfigAction::Show => {
+            let cfg = ScaffConfig::load();
+            display::section("Configuration");
+            display::kv("model", &cfg.model);
+            display::kv("default_provider", &cfg.default_provider);
+            display::kv("retrieval_k", &cfg.retrieval_k.to_string());
+            display::kv("web_enabled", &cfg.web_enabled.to_string());
+            display::kv("show_cost", &cfg.show_cost.to_string());
+            display::kv("cheap", &cfg.cheap.to_string());
+            display::kv("corpus_dir", &cfg.corpus_dir);
+            display::kv("stored API keys", &format!("{} provider(s)", cfg.api_keys.len()));
+            display::kv("config file", &ScaffConfig::config_path().display().to_string());
+            display::kv("corpus DB", &ScaffConfig::corpus_db_path().display().to_string());
+            Ok(())
+        }
+        ConfigAction::Set { key, value } => {
+            let mut cfg = ScaffConfig::load();
+            let value_for_msg = value.clone();
+            match key.as_str() {
+                "model" => cfg.model = value,
+                "default_provider" => {
+                    config::resolve_provider(Some(&value))?;
+                    cfg.default_provider = value;
+                }
+                "retrieval_k" => {
+                    let n: usize = value.parse().map_err(|_| "retrieval_k must be a number")?;
+                    cfg.retrieval_k = n;
+                }
+                "web_enabled" => cfg.web_enabled = parse_bool(&value)?,
+                "show_cost" => cfg.show_cost = parse_bool(&value)?,
+                "cheap" => cfg.cheap = parse_bool(&value)?,
+                "corpus_dir" => cfg.corpus_dir = value,
+                other => return Err(format!("Unknown config key: {other}")),
+            }
+            cfg.save()?;
+            display::ok(&format!("Set {key} = {value_for_msg}"));
+            Ok(())
+        }
+        ConfigAction::SetKey { provider: p, key } => {
+            let provider = config::resolve_provider(Some(&p))?;
+            let mut cfg = ScaffConfig::load();
+            cfg.set_api_key(provider.name, key);
+            cfg.save()?;
+            display::ok(&format!("Stored API key for {}", provider.name));
+            Ok(())
+        }
+        ConfigAction::Reset => {
+            ScaffConfig::default().save()?;
+            display::ok("Reset configuration to defaults");
+            Ok(())
+        }
+    }
+}
+
+fn cmd_doctor() -> Result<(), String> {
+    display::section("scaff doctor");
+    display::kv("version", env!("CARGO_PKG_VERSION"));
+    display::kv("config file", &ScaffConfig::config_path().display().to_string());
+
+    let cfg = ScaffConfig::load();
+    let provider = config::resolve_provider(Some(&cfg.default_provider))?;
+    display::kv("provider", provider.name);
+    match config::resolve_api_key(provider, &cfg) {
+        Ok(Some(_)) => display::kv("API key", "found"),
+        Ok(None) if !provider.requires_key => display::kv("API key", "not required"),
+        Ok(None) => {
+            display::kv("API key", "MISSING");
+            eprintln!(
+                "\n  Set it via env var {} or: scaff config set-key {} <KEY>",
+                provider.env_var, provider.name
+            );
+        }
+        Err(e) => display::kv("API key", &format!("error: {e}")),
+    }
+
+    display::kv("---", "---");
+
+    // Connectors
+    for mut c in connectors::list_default_connectors() {
+        let (status, detail) = connectors::test_connector(&c.name)
+            .unwrap_or((connectors::ConnectorStatus::Unknown, serde_json::json!({})));
+        c.status = status;
+        c.details = detail;
+        let badge = match c.status {
+            connectors::ConnectorStatus::Healthy => style("HEALTHY").green(),
+            connectors::ConnectorStatus::Degraded => style("DEGRADED").yellow(),
+            connectors::ConnectorStatus::Failed => style("FAILED").red(),
+            connectors::ConnectorStatus::Unknown => style("UNKNOWN").dim(),
+        };
+        let kind = match c.kind {
+            connectors::ConnectorKind::Corpus => "corpus",
+            connectors::ConnectorKind::Web => "web",
+            connectors::ConnectorKind::Local => "local",
+        };
+        println!("  connector [{}] {} — {} {}", kind, c.name, badge, c.details);
+    }
+
+    display::ok("doctor complete");
     Ok(())
 }
 
-fn cmd_deploy(_dir: String, _platform: Option<String>, _verbose: bool) -> Result<(), String> {
-    println!("[{}] Deploy functionality bridges to Python backend.", console::style("*").dim());
-    println!("  Use the Python CLI for full deploy support.");
-    println!();
-
-    Ok(())
+fn cmd_setup() -> Result<(), String> {
+    init::run_setup_wizard().map_err(|e| format!("setup: {e}"))
 }
 
-fn cmd_test(_prompt: Vec<String>, _dir: String, _prompts: Option<String>, _verbose: bool) -> Result<(), String> {
-    println!("[{}] Test functionality bridges to Python backend.", console::style("*").dim());
-    println!("  Use the Python CLI for full test support.");
-    println!();
-
-    Ok(())
-}
-
-fn cmd_upgrade(_dir: String, _provider: Option<String>, _dry_run: bool, _verbose: bool) -> Result<(), String> {
-    println!("[{}] Upgrade functionality bridges to Python backend.", console::style("*").dim());
-    println!("  For now, use the Python CLI for upgrade support.");
-    println!();
-
-    Ok(())
-}
-
-fn cmd_monitor(refresh: u64, once: bool) -> Result<(), String> {
-    crate::monitor::run_dashboard(refresh, once)
-}
-
-fn cmd_completions(shell: String) -> Result<(), String> {
-    use clap::CommandFactory;
-    let mut cmd = crate::Cli::command();
-    let shell = match shell.as_str() {
+fn cmd_completions(shell: &str) -> Result<(), String> {
+    let mut app = Cli::command();
+    let shell_type = match shell {
         "bash" => clap_complete::Shell::Bash,
         "zsh" => clap_complete::Shell::Zsh,
         "fish" => clap_complete::Shell::Fish,
@@ -1336,34 +806,48 @@ fn cmd_completions(shell: String) -> Result<(), String> {
         "elvish" => clap_complete::Shell::Elvish,
         _ => return Err(format!("Unknown shell: {shell}. Valid: bash, zsh, fish, powershell, elvish")),
     };
-    let mut stdout = std::io::stdout();
-    clap_complete::generate(shell, &mut cmd, "scaff", &mut stdout);
+    let mut buf: Vec<u8> = Vec::new();
+    clap_complete::generate(shell_type, &mut app, "scaff", &mut buf);
+    std::io::stdout().write_all(&buf).map_err(|e| format!("{e}"))?;
     Ok(())
 }
 
-fn cmd_export(format: String, output: Option<String>, session: Option<String>) -> Result<(), String> {
-    let tracker = TokenTracker::new();
+fn display_kv_color(k: &str, v: &str) -> String {
+    format!("{} \u{2192} {}", style(k).bold(), v)
+}
 
-    let data = if let Some(ref sid) = session {
-        tracker.export_csv_for_session(sid)?
+fn snippet(s: &str, max: usize) -> String {
+    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() <= max {
+        collapsed
     } else {
-        match format.as_str() {
-            "json" => tracker.export_json()?,
-            "csv" => tracker.export_csv()?,
-            _ => return Err(format!("Invalid format: {format}. Valid: json, csv")),
-        }
-    };
-
-    match output {
-        Some(path) => {
-            fs::write(&path, &data)
-                .map_err(|e| format!("Failed to write export file: {e}"))?;
-            display::ok(&format!("Exported token data to {path}"));
-        }
-        None => {
-            println!("{data}");
-        }
+        format!("{}\u{2026}", &collapsed[..max])
     }
+}
 
-    Ok(())
+fn parse_bool(s: &str) -> Result<bool, String> {
+    match s.to_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "no" | "n" | "off" => Ok(false),
+        _ => Err(format!("expected bool, got: {s}")),
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n).collect();
+        out.push('…');
+        out
+    }
+}
+
+#[allow(dead_code)]
+const _VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// Re-export for the report renderer so the version constant resolves.
+#[allow(dead_code)]
+fn _render_unused() {
+    let _ = render::render_report;
 }
