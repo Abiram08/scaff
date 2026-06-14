@@ -1,7 +1,9 @@
-"""Multi-provider LLM client."""
+"""Multi-provider LLM client with rate limiting and token tracking."""
 from __future__ import annotations
 
 import json
+import logging
+import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
@@ -9,6 +11,10 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .config import RelayConfig
+from .rate_limit import RateLimiter
+from .token_tracker import TokenTracker
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,9 +45,18 @@ class ChatResponse:
 
 
 class LLMClient:
-    def __init__(self, config: RelayConfig):
+    def __init__(self, config: RelayConfig, rate_limiter: RateLimiter | None = None,
+                 token_tracker: TokenTracker | None = None):
         self.config = config
         self._http = httpx.AsyncClient(timeout=120.0)
+        self._limiter = rate_limiter or RateLimiter()
+        self._token_tracker = token_tracker or TokenTracker()
+        self._session_id: str = ""
+        self._stage: str = ""
+
+    def set_context(self, session_id: str, stage: str = ""):
+        self._session_id = session_id
+        self._stage = stage
 
     async def close(self):
         await self._http.aclose()
@@ -53,15 +68,59 @@ class LLMClient:
         model: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        api_key: Optional[str] = None,
     ) -> ChatResponse:
         model = model or self.config.llm.model
         provider = self.config.llm.provider
-        api_key = self.config.get_api_key()
 
-        if provider == "anthropic":
-            return await self._chat_anthropic(messages, model, temperature, max_tokens, api_key)
-        else:
-            return await self._chat_openai_compat(messages, model, temperature, max_tokens, api_key)
+        provider_map = {"openai": "openai", "anthropic": "anthropic",
+                        "gemini": "gemini", "groq": "groq", "ollama": "ollama"}
+        provider_check = provider_map.get(provider, "openai")
+
+        if api_key is None:
+            api_key = self._get_api_key(provider_check)
+        await self._limiter.acquire(provider)
+
+        start = time.monotonic()
+        try:
+            if provider == "anthropic":
+                resp = await self._chat_anthropic(messages, model, temperature, max_tokens, api_key)
+            else:
+                resp = await self._chat_openai_compat(messages, model, temperature, max_tokens, api_key)
+        except Exception as e:
+            error_str = str(e).lower()
+            if "401" in error_str or "unauthorized" in error_str or "auth" in error_str or "invalid" in error_str:
+                raise RuntimeError(
+                    f"Invalid or missing API key for {provider}. Open the Settings (⚙️) to set your key."
+                ) from e
+            if "402" in error_str or "insufficient" in error_str or "quota" in error_str or "rate limit" in error_str:
+                raise RuntimeError(
+                    f"API rate limit or quota exceeded for {provider}. Check your billing."
+                ) from e
+            raise
+
+        elapsed = int((time.monotonic() - start) * 1000)
+
+        await self._token_tracker.record(
+            provider=provider,
+            model=resp.model,
+            input_tokens=resp.usage.input_tokens,
+            output_tokens=resp.usage.output_tokens,
+            session_id=self._session_id,
+            stage=self._stage,
+            duration_ms=elapsed,
+        )
+        return resp
+
+    def _get_api_key(self, provider: str) -> Optional[str]:
+        """Get API key from the per-request store, fallback to config (env vars)."""
+        if hasattr(self, '_key_override') and self._key_override:
+            return self._key_override
+        return self.config.get_api_key(provider)
+
+    def set_api_key(self, api_key: str) -> None:
+        """Set a per-request API key override (called from pipeline)."""
+        self._key_override = api_key
 
     async def _chat_anthropic(
         self,
@@ -174,6 +233,8 @@ class LLMClient:
         model = model or self.config.llm.model
         provider = self.config.llm.provider
         api_key = self.config.get_api_key()
+
+        await self._limiter.acquire(provider)
 
         if provider == "anthropic":
             async for chunk in self._stream_anthropic(messages, model, temperature, max_tokens, api_key):

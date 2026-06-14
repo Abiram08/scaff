@@ -167,6 +167,8 @@ class Session:
     synthesis: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    input_tokens: int = 0
+    output_tokens: int = 0
 
     @classmethod
     def create(cls, query: str) -> "Session":
@@ -183,6 +185,10 @@ class Session:
     def add_finding(self, finding: Finding):
         self.findings.append(finding)
         self.updated_at = datetime.now(timezone.utc)
+
+    def add_token_usage(self, input_tokens: int, output_tokens: int):
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
 
     def to_dict(self) -> dict:
         return {
@@ -204,6 +210,8 @@ class Session:
                 for f in self.findings
             ],
             "synthesis": self.synthesis,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }

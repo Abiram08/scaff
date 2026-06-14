@@ -46,7 +46,7 @@ class PlanAgent:
             [system, user],
             model=model,
             temperature=0.2,
-            max_tokens=800,
+            max_tokens=500,
         )
 
         parsed = self._extract_json(resp.content)

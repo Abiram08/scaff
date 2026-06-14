@@ -1,0 +1,9 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro'
+import { AgentShell } from '../components/react/AgentShell'
+---
+
+<BaseLayout>
+  <title>Relay — Agent</title>
+  <AgentShell client:only="react" />
+</BaseLayout>

@@ -1,6 +1,7 @@
-"""Web search with multiple providers."""
+"""Web search with multiple providers + rate limiting."""
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -8,6 +9,10 @@ from urllib.parse import quote_plus
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+from .rate_limit import RateLimiter
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,16 +24,18 @@ class WebResult:
 
 
 class WebSearcher:
-    def __init__(self, provider: str = "tavily", api_key: Optional[str] = None):
+    def __init__(self, provider: str = "tavily", api_key: Optional[str] = None, rate_limiter: RateLimiter | None = None):
         self.provider = provider
         self.api_key = api_key
         self._http = httpx.AsyncClient(timeout=30.0)
+        self._limiter = rate_limiter or RateLimiter()
 
     async def close(self):
         await self._http.aclose()
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
     async def search(self, query: str, max_results: int = 5) -> list[WebResult]:
+        await self._limiter.acquire(self.provider)
         if self.provider == "tavily" and self.api_key:
             return await self._search_tavily(query, max_results)
         elif self.provider == "brave" and self.api_key:

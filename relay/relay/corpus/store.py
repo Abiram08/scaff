@@ -1,4 +1,4 @@
-"""Corpus storage with SQLite + FTS5."""
+"""Corpus storage with SQLite + FTS5 + embedding vector search."""
 from __future__ import annotations
 
 import json
@@ -9,6 +9,8 @@ from typing import Optional
 
 import aiosqlite
 
+from .embedder import cosine_similarity, deserialize_embedding, serialize_embedding
+
 
 @dataclass
 class CorpusChunk:
@@ -18,6 +20,14 @@ class CorpusChunk:
     section: Optional[str]
     content: str
     source: str = "seed"
+    embedding: Optional[list[float]] = None
+
+
+@dataclass
+class CorpusSearchResult:
+    chunk: CorpusChunk
+    score: float
+    rank: int
 
 
 class CorpusStore:
@@ -42,6 +52,14 @@ class CorpusStore:
                     id, title, section, content
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS embeddings (
+                    chunk_id TEXT PRIMARY KEY,
+                    vector TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT 'text-embedding-3-small',
+                    FOREIGN KEY (chunk_id) REFERENCES chunks(id)
+                )
+            """)
             await db.commit()
 
     async def insert_chunks(self, chunks: list[CorpusChunk]):
@@ -51,6 +69,11 @@ class CorpusStore:
                     "INSERT OR REPLACE INTO chunks (id, url, title, section, content, source) VALUES (?, ?, ?, ?, ?, ?)",
                     (chunk.id, chunk.url, chunk.title, chunk.section, chunk.content, chunk.source),
                 )
+                if chunk.embedding:
+                    await db.execute(
+                        "INSERT OR REPLACE INTO embeddings (chunk_id, vector) VALUES (?, ?)",
+                        (chunk.id, serialize_embedding(chunk.embedding)),
+                    )
             await db.commit()
 
             await db.execute("DELETE FROM chunks_fts")
@@ -59,6 +82,117 @@ class CorpusStore:
                 SELECT rowid, id, title, section, content FROM chunks
             """)
             await db.commit()
+
+    async def search_vector(
+        self,
+        query_vector: list[float],
+        limit: int = 10,
+        min_score: float = 0.5,
+    ) -> list[CorpusSearchResult]:
+        """Search by vector similarity (cosine). Loads all embeddings and scores in memory."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT c.*, e.vector as emb
+                FROM chunks c
+                JOIN embeddings e ON c.id = e.chunk_id
+            """)
+            rows = await cursor.fetchall()
+
+        scored = []
+        for row in rows:
+            emb = deserialize_embedding(row["emb"])
+            score = cosine_similarity(query_vector, emb)
+            if score >= min_score:
+                scored.append(CorpusSearchResult(
+                    chunk=CorpusChunk(
+                        id=row["id"],
+                        url=row["url"],
+                        title=row["title"],
+                        section=row["section"],
+                        content=row["content"],
+                        source=row["source"],
+                        embedding=emb,
+                    ),
+                    score=score,
+                    rank=0,
+                ))
+
+        scored.sort(key=lambda r: r.score, reverse=True)
+        for i, r in enumerate(scored):
+            r.rank = i + 1
+        return scored[:limit]
+
+    async def hybrid_search(
+        self,
+        query: str,
+        query_vector: list[float],
+        limit: int = 10,
+        fts_weight: float = 0.4,
+        vector_weight: float = 0.6,
+    ) -> list[CorpusSearchResult]:
+        """Combine FTS and vector search with weighted scoring."""
+        fts_results = await self.search_fts(query, limit=limit * 2)
+        vector_results = await self.search_vector(query_vector, limit=limit * 2)
+
+        merged: dict[str, CorpusSearchResult] = {}
+
+        for r in fts_results:
+            merged[r.chunk.id] = CorpusSearchResult(
+                chunk=r.chunk,
+                score=r.score * fts_weight,
+                rank=0,
+            )
+
+        for r in vector_results:
+            if r.chunk.id in merged:
+                merged[r.chunk.id].score += r.score * vector_weight
+            else:
+                merged[r.chunk.id] = CorpusSearchResult(
+                    chunk=r.chunk,
+                    score=r.score * vector_weight,
+                    rank=0,
+                )
+
+        sorted_results = sorted(merged.values(), key=lambda r: r.score, reverse=True)
+        for i, r in enumerate(sorted_results):
+            r.rank = i + 1
+        return sorted_results[:limit]
+
+    async def set_embedding(self, chunk_id: str, vector: list[float], model: str = "text-embedding-3-small"):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO embeddings (chunk_id, vector, model) VALUES (?, ?, ?)",
+                (chunk_id, serialize_embedding(vector), model),
+            )
+            await db.commit()
+
+    async def get_unembedded_chunks(self) -> list[CorpusChunk]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT c.* FROM chunks c
+                LEFT JOIN embeddings e ON c.id = e.chunk_id
+                WHERE e.chunk_id IS NULL
+            """)
+            rows = await cursor.fetchall()
+            return [
+                CorpusChunk(
+                    id=row["id"],
+                    url=row["url"],
+                    title=row["title"],
+                    section=row["section"],
+                    content=row["content"],
+                    source=row["source"],
+                )
+                for row in rows
+            ]
+
+    async def get_embedding_count(self) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM embeddings")
+            row = await cursor.fetchone()
+            return row[0]
 
     async def search_fts(self, query: str, limit: int = 10) -> list[CorpusChunk]:
         async with aiosqlite.connect(self.db_path) as db:

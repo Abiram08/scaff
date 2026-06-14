@@ -3,10 +3,10 @@ interface ConfidenceBadgeProps {
 }
 
 const styles = {
-  high: { background: 'rgba(34, 255, 100, 0.15)', border: '1px solid rgba(34, 255, 100, 0.4)', color: '#22ff64', label: 'HIGH', icon: '✓' },
-  medium: { background: 'rgba(255, 200, 34, 0.15)', border: '1px solid rgba(255, 200, 34, 0.4)', color: '#ffc822', label: 'MEDIUM', icon: '!' },
-  low: { background: 'rgba(255, 100, 34, 0.15)', border: '1px solid rgba(255, 100, 34, 0.4)', color: '#ff6422', label: 'LOW', icon: '?' },
-  contested: { background: 'rgba(255, 34, 34, 0.15)', border: '1px solid rgba(255, 34, 34, 0.4)', color: '#ff2222', label: 'CONTESTED', icon: '⚡' },
+  high: { background: 'rgba(16, 185, 129, 0.15)', border: '1px solid rgba(16, 185, 129, 0.4)', color: '#10b981', label: 'HIGH', icon: '✓' },
+  medium: { background: 'rgba(245, 158, 11, 0.15)', border: '1px solid rgba(245, 158, 11, 0.4)', color: '#f59e0b', label: 'MEDIUM', icon: '!' },
+  low: { background: 'rgba(249, 115, 22, 0.15)', border: '1px solid rgba(249, 115, 22, 0.4)', color: '#f97316', label: 'LOW', icon: '?' },
+  contested: { background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#ef4444', label: 'CONTESTED', icon: '⚡' },
 }
 
 export function ConfidenceBadge({ confidence }: ConfidenceBadgeProps) {

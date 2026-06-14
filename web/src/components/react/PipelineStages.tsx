@@ -19,7 +19,7 @@ export function PipelineStages({ status }: PipelineStagesProps) {
     <div className="p-5 rounded-xl" style={{
       background: 'rgba(25, 25, 40, 0.9)',
       backdropFilter: 'blur(12px)',
-      border: '1px solid rgba(34, 0, 255, 0.15)',
+      border: '1px solid rgba(99, 102, 241, 0.15)',
     }}>
       <div className="flex items-center justify-between">
         {stages.map((stage, i) => {
@@ -40,13 +40,13 @@ export function PipelineStages({ status }: PipelineStagesProps) {
                   fontSize: 14,
                   transition: 'all 0.4s ease',
                   ...(isActive ? {
-                    background: 'linear-gradient(135deg, #2200FF, #4422FF)',
+                    background: 'linear-gradient(135deg, #6366f1, #818cf8)',
                     color: 'white',
-                    boxShadow: '0 0 25px rgba(34, 0, 255, 0.5)',
+                    boxShadow: '0 0 25px rgba(99, 102, 241, 0.5)',
                     transform: 'scale(1.1)',
                   } : isComplete ? {
-                    background: 'rgba(34, 0, 255, 0.2)',
-                    color: '#4422FF',
+                    background: 'rgba(99, 102, 241, 0.2)',
+                    color: '#818cf8',
                   } : {
                     background: 'rgba(30, 30, 45, 0.8)',
                     color: 'rgba(255, 255, 255, 0.3)',
@@ -64,7 +64,7 @@ export function PipelineStages({ status }: PipelineStagesProps) {
                   fontSize: 12,
                   fontFamily: "'Patrick Hand SC', cursive",
                   letterSpacing: '0.15em',
-                  color: isActive ? '#4422FF' : isComplete ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.2)',
+                  color: isActive ? '#818cf8' : isComplete ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.2)',
                 }}>
                   {stage.label}
                 </span>
@@ -75,7 +75,7 @@ export function PipelineStages({ status }: PipelineStagesProps) {
                   height: 2,
                   margin: '0 12px',
                   marginTop: -20,
-                  background: isComplete ? '#2200FF' : 'rgba(255,255,255,0.1)',
+                  background: isComplete ? '#6366f1' : 'rgba(255,255,255,0.1)',
                 }} />
               )}
             </div>

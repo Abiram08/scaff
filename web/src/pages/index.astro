@@ -1,0 +1,276 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro'
+---
+
+<BaseLayout>
+  <div class="relative min-h-screen overflow-hidden bg-dark-950">
+    <!-- Animated orbs -->
+    <div class="orb-glow w-[600px] h-[600px] bg-relay/20 -top-60 -right-40 animate-float" />
+    <div class="orb-glow w-[500px] h-[500px] bg-accent/15 -bottom-48 -left-48 animate-float-slow" />
+    <div class="orb-glow w-[350px] h-[350px] bg-warm/10 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+    <div class="orb-glow w-[400px] h-[400px] bg-cyan-500/10 top-1/3 right-1/4 animate-float" style="animation-delay: -3s;" />
+    <div class="absolute inset-0 mesh-grid opacity-40" />
+
+    <!-- Nav -->
+    <nav class="relative z-20 flex items-center justify-between px-6 sm:px-12 py-6">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-relay flex items-center justify-center shadow-lg shadow-relay/30">
+          <svg class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        </div>
+        <span class="text-white text-lg font-hand tracking-[0.2em] font-bold">RELAY</span>
+      </div>
+      <div class="flex items-center gap-4 sm:gap-8">
+        <a href="#features" class="text-white/50 hover:text-white/80 text-xs font-hand tracking-[0.15em] font-bold transition-colors uppercase">Features</a>
+        <a href="#how-it-works" class="text-white/50 hover:text-white/80 text-xs font-hand tracking-[0.15em] font-bold transition-colors uppercase">How It Works</a>
+        <a href="/agent" class="px-5 py-2.5 rounded-xl text-xs text-white font-hand tracking-[0.15em] font-bold uppercase transition-all duration-300 hover:brightness-125 bg-relay shadow-lg shadow-relay/30">
+          Launch Agent
+        </a>
+      </div>
+    </nav>
+
+    <!-- Hero -->
+    <section class="relative z-10 flex flex-col items-center justify-center px-6 pt-24 pb-32 text-center">
+      <div class="inline-flex items-center gap-3 px-5 py-2 rounded-full text-[10px] font-bold uppercase tracking-[0.2em] text-white/60 border border-white/10 bg-white/[0.04] backdrop-blur-sm mb-8 animate-fade-in">
+        <span class="w-2 h-2 rounded-full bg-confidence-high animate-pulse" />
+        Deep Research Agent &mdash; v0.1
+      </div>
+
+      <h1 class="text-6xl sm:text-7xl md:text-8xl font-bold text-white font-hand tracking-[0.12em] leading-none mb-6 animate-slide-up" style="text-shadow: 0 0 80px rgba(99,102,241,0.3);">
+        Research That
+        <br />
+        <span class="bg-gradient-to-r from-relay via-accent to-warm bg-clip-text text-transparent">Ships Like Software</span>
+      </h1>
+
+      <p class="text-base sm:text-lg text-white/50 max-w-xl font-hand tracking-[0.1em] font-bold mb-10 animate-slide-up" style="animation-delay: 0.1s;">
+        Relay decomposes queries, searches Harness docs and the web in parallel,
+        cross-checks claims, and streams verified findings &mdash; all through a
+        pipeline you can steer mid-flight.
+      </p>
+
+      <div class="flex flex-col sm:flex-row items-center gap-4 animate-slide-up" style="animation-delay: 0.2s;">
+        <a href="/agent" class="group relative px-8 py-4 rounded-2xl text-sm font-bold font-hand tracking-[0.15em] text-white uppercase transition-all duration-500 hover:scale-105 overflow-hidden">
+          <div class="absolute inset-0 bg-gradient-to-r from-relay via-accent to-warm opacity-90 group-hover:opacity-100 transition-opacity duration-500" />
+          <div class="absolute inset-0 bg-gradient-to-r from-relay via-accent to-warm blur-xl opacity-50 group-hover:opacity-70 transition-opacity duration-500" />
+          <span class="relative z-10">Start Researching</span>
+        </a>
+        <a href="#how-it-works" class="px-8 py-4 rounded-2xl text-sm font-bold font-hand tracking-[0.15em] text-white/60 uppercase transition-all duration-300 hover:text-white/90 border border-white/10 hover:border-white/25 bg-white/[0.04]">
+          How It Works
+        </a>
+      </div>
+
+      <div class="mt-12 flex flex-wrap justify-center gap-3 animate-fade-in" style="animation-delay: 0.4s;">
+        <span class="px-4 py-2 rounded-xl text-[10px] font-bold font-hand tracking-[0.15em] uppercase text-white/30 border border-white/5 bg-white/[0.03]">Multi-Provider LLM</span>
+        <span class="px-4 py-2 rounded-xl text-[10px] font-bold font-hand tracking-[0.15em] uppercase text-white/30 border border-white/5 bg-white/[0.03]">Verified Claims</span>
+        <span class="px-4 py-2 rounded-xl text-[10px] font-bold font-hand tracking-[0.15em] uppercase text-white/30 border border-white/5 bg-white/[0.03]">Streaming Results</span>
+        <span class="px-4 py-2 rounded-xl text-[10px] font-bold font-hand tracking-[0.15em] uppercase text-white/30 border border-white/5 bg-white/[0.03]">Cross-Session Memory</span>
+      </div>
+    </section>
+
+    <!-- Gradient divider -->
+    <div class="relative z-10 h-40 -mt-40 bg-gradient-to-b from-transparent to-dark-950 pointer-events-none" />
+
+    <!-- Stats bar -->
+    <section class="relative z-10 px-6 pb-24">
+      <div class="max-w-5xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-px rounded-2xl overflow-hidden border border-white/5 bg-white/[0.04] backdrop-blur-sm">
+        <div class="p-6 sm:p-8 text-center bg-dark-950/80">
+          <div class="text-3xl sm:text-4xl font-bold font-hand tracking-[0.1em] text-white mb-1">4</div>
+          <div class="text-[10px] font-bold font-hand tracking-[0.15em] uppercase text-white/30">Pipeline Stages</div>
+        </div>
+        <div class="p-6 sm:p-8 text-center bg-dark-950/80">
+          <div class="text-3xl sm:text-4xl font-bold font-hand tracking-[0.1em] text-white mb-1">5+</div>
+          <div class="text-[10px] font-bold font-hand tracking-[0.15em] uppercase text-white/30">LLM Providers</div>
+        </div>
+        <div class="p-6 sm:p-8 text-center bg-dark-950/80">
+          <div class="text-3xl sm:text-4xl font-bold font-hand tracking-[0.1em] text-white mb-1">4</div>
+          <div class="text-[10px] font-bold font-hand tracking-[0.15em] uppercase text-white/30">Confidence Tiers</div>
+        </div>
+        <div class="p-6 sm:p-8 text-center bg-dark-950/80">
+          <div class="text-3xl sm:text-4xl font-bold font-hand tracking-[0.1em] text-white mb-1">2</div>
+          <div class="text-[10px] font-bold font-hand tracking-[0.15em] uppercase text-white/30">Search Sources</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section id="features" class="relative z-10 px-6 pb-28">
+      <div class="max-w-5xl mx-auto">
+        <div class="text-center mb-16">
+          <span class="text-[10px] font-bold font-hand tracking-[0.2em] uppercase text-white/30">Capabilities</span>
+          <h2 class="text-3xl sm:text-4xl font-bold font-hand tracking-[0.12em] text-white mt-3">Why Relay?</h2>
+          <div class="w-16 h-0.5 mx-auto mt-4 rounded-full bg-gradient-to-r from-relay via-accent to-warm" />
+        </div>
+
+        <div class="grid sm:grid-cols-2 gap-4">
+          <!-- Verified Claims -->
+          <div class="card-hover group p-6 sm:p-8 rounded-2xl bg-dark-900/60 backdrop-blur-sm border border-white/[0.06]">
+            <div class="flex items-start gap-4 sm:gap-5">
+              <div class="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 bg-confidence-high/15 text-confidence-high">
+                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div class="space-y-2">
+                <h3 class="text-sm font-bold font-hand tracking-[0.15em] text-white uppercase">Verified Claims</h3>
+                <p class="text-sm font-bold font-hand tracking-[0.06em] text-white/50 leading-relaxed">
+                  Every claim cross-checked across sources. Confidence scored high/medium/low so you know what to trust.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Parallel Search -->
+          <div class="card-hover group p-6 sm:p-8 rounded-2xl bg-dark-900/60 backdrop-blur-sm border border-white/[0.06]">
+            <div class="flex items-start gap-4 sm:gap-5">
+              <div class="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 bg-accent/15 text-accent">
+                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+              </div>
+              <div class="space-y-2">
+                <h3 class="text-sm font-bold font-hand tracking-[0.15em] text-white uppercase">Parallel Search</h3>
+                <p class="text-sm font-bold font-hand tracking-[0.06em] text-white/50 leading-relaxed">
+                  Harness docs + web searches fire simultaneously. No sequential bottlenecks &mdash; answers arrive faster.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Streaming Results -->
+          <div class="card-hover group p-6 sm:p-8 rounded-2xl bg-dark-900/60 backdrop-blur-sm border border-white/[0.06]">
+            <div class="flex items-start gap-4 sm:gap-5">
+              <div class="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 bg-warm/15 text-warm">
+                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                </svg>
+              </div>
+              <div class="space-y-2">
+                <h3 class="text-sm font-bold font-hand tracking-[0.15em] text-white uppercase">Streaming Results</h3>
+                <p class="text-sm font-bold font-hand tracking-[0.06em] text-white/50 leading-relaxed">
+                  Findings appear as they&rsquo;re verified. Use <code class="text-accent bg-accent/10 px-1.5 py-0.5 rounded text-[11px]">/deepen</code> or <code class="text-accent bg-accent/10 px-1.5 py-0.5 rounded text-[11px]">/redirect</code> mid-stream to steer the research.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Token Aware -->
+          <div class="card-hover group p-6 sm:p-8 rounded-2xl bg-dark-900/60 backdrop-blur-sm border border-white/[0.06]">
+            <div class="flex items-start gap-4 sm:gap-5">
+              <div class="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 bg-cyan-500/15 text-cyan-400">
+                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+              </div>
+              <div class="space-y-2">
+                <h3 class="text-sm font-bold font-hand tracking-[0.15em] text-white uppercase">Token Aware</h3>
+                <p class="text-sm font-bold font-hand tracking-[0.06em] text-white/50 leading-relaxed">
+                  Every LLM call tracked. See token usage and cost in real-time. No surprises on your bill.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- How It Works -->
+    <section id="how-it-works" class="relative z-10 px-6 pb-28">
+      <div class="max-w-3xl mx-auto">
+        <div class="text-center mb-16">
+          <span class="text-[10px] font-bold font-hand tracking-[0.2em] uppercase text-white/30">Pipeline</span>
+          <h2 class="text-3xl sm:text-4xl font-bold font-hand tracking-[0.12em] text-white mt-3">How It Works</h2>
+          <div class="w-16 h-0.5 mx-auto mt-4 rounded-full bg-gradient-to-r from-cyan-400 via-relay to-accent" />
+        </div>
+
+        <!-- Step 1 -->
+        <div class="flex items-start gap-6 group mb-10">
+          <div class="flex flex-col items-center">
+            <div class="w-12 h-12 rounded-xl flex items-center justify-center bg-gradient-to-br from-relay to-accent shadow-lg shadow-relay/30 transition-all duration-300 group-hover:scale-110">
+              <span class="text-white text-xs font-bold font-hand">01</span>
+            </div>
+            <div class="w-0.5 h-10 mt-2 rounded-full bg-white/[0.08]" />
+          </div>
+          <div class="pt-2.5">
+            <h3 class="text-white font-bold font-hand tracking-[0.15em] uppercase mb-1" style="font-size: 15px;">Plan</h3>
+            <p class="text-sm font-bold font-hand tracking-[0.06em] text-white/50 leading-relaxed">
+              Your question is decomposed into sub-questions. Each is tagged for the right source &mdash; Harness docs, web, or both.
+            </p>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="flex items-start gap-6 group mb-10">
+          <div class="flex flex-col items-center">
+            <div class="w-12 h-12 rounded-xl flex items-center justify-center bg-gradient-to-br from-accent to-warm shadow-lg shadow-accent/30 transition-all duration-300 group-hover:scale-110">
+              <span class="text-white text-xs font-bold font-hand">02</span>
+            </div>
+            <div class="w-0.5 h-10 mt-2 rounded-full bg-white/[0.08]" />
+          </div>
+          <div class="pt-2.5">
+            <h3 class="text-white font-bold font-hand tracking-[0.15em] uppercase mb-1" style="font-size: 15px;">Search &amp; Verify</h3>
+            <p class="text-sm font-bold font-hand tracking-[0.06em] text-white/50 leading-relaxed">
+              All sub-questions fire in parallel across the Harness corpus and the open web. Results are cross-checked and scored by confidence.
+            </p>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="flex items-start gap-6 group">
+          <div class="flex flex-col items-center">
+            <div class="w-12 h-12 rounded-xl flex items-center justify-center bg-gradient-to-br from-warm to-confidence-high shadow-lg shadow-warm/30 transition-all duration-300 group-hover:scale-110">
+              <span class="text-white text-xs font-bold font-hand">03</span>
+            </div>
+          </div>
+          <div class="pt-2.5">
+            <h3 class="text-white font-bold font-hand tracking-[0.15em] uppercase mb-1" style="font-size: 15px;">Synthesize &amp; Stream</h3>
+            <p class="text-sm font-bold font-hand tracking-[0.06em] text-white/50 leading-relaxed">
+              Findings stream to you as each sub-question is verified &mdash; no waiting for the full report. Deepen or redirect the research at any time.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="relative z-10 px-6 pb-32">
+      <div class="max-w-2xl mx-auto text-center relative overflow-hidden rounded-3xl p-10 sm:p-16 border border-white/[0.08] bg-gradient-to-br from-dark-900 via-dark-900/80 to-dark-900">
+        <div class="orb-glow w-[300px] h-[300px] bg-relay/10 -top-32 -right-32" />
+        <div class="orb-glow w-[200px] h-[200px] bg-accent/10 -bottom-20 -left-20" />
+        <div class="relative z-10">
+          <h2 class="text-3xl sm:text-4xl font-bold font-hand tracking-[0.12em] text-white mb-4">
+            Ready to Ship Research?
+          </h2>
+          <p class="text-sm font-bold font-hand tracking-[0.06em] text-white/50 max-w-md mx-auto mb-8">
+            No sign-up, no config. Set your API key and start researching in seconds.
+          </p>
+          <a href="/agent" class="inline-flex items-center gap-2 px-8 py-4 rounded-2xl text-sm font-bold font-hand tracking-[0.15em] text-white uppercase transition-all duration-300 hover:brightness-125 bg-gradient-to-r from-relay to-accent shadow-lg shadow-relay/30">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            Launch Relay
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="relative z-10 px-6 pb-10">
+      <div class="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 pt-8 border-t border-white/[0.06]">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-relay/20 flex items-center justify-center">
+            <svg class="w-4 h-4 text-relay-light" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+          </div>
+          <span class="text-xs font-bold font-hand tracking-[0.15em] text-white/20 uppercase">Relay &mdash; Research that ships like software</span>
+        </div>
+        <div class="flex items-center gap-6">
+          <a href="/agent" class="text-[10px] font-bold font-hand tracking-[0.2em] text-white/20 hover:text-white/50 uppercase transition-colors">Agent</a>
+          <a href="#features" class="text-[10px] font-bold font-hand tracking-[0.2em] text-white/20 hover:text-white/50 uppercase transition-colors">Features</a>
+          <a href="#how-it-works" class="text-[10px] font-bold font-hand tracking-[0.2em] text-white/20 hover:text-white/50 uppercase transition-colors">Pipeline</a>
+        </div>
+      </div>
+    </footer>
+  </div>
+</BaseLayout>

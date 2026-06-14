@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from ..llm import LLMClient, ChatMessage
 from ..types import Claim, Confidence, VerificationResult, Stance, Source
 
+SOURCE_CONTENT_MAX_CHARS = 500  # was 1500 — aggressive truncation saves ~60% tokens
+
 
 @dataclass
 class VerifyResult:
@@ -62,7 +64,7 @@ class VerifyAgent:
             [system, user],
             model=model,
             temperature=0.1,
-            max_tokens=1500,
+            max_tokens=1000,
         )
 
         parsed = self._extract_json(resp.content)
@@ -75,10 +77,11 @@ class VerifyAgent:
     def _format_sources(self, sources: list[Source]) -> str:
         parts = []
         for src in sources:
+            content = src.content[:SOURCE_CONTENT_MAX_CHARS] if src.content else "(no content)"
             parts.append(
                 f"[{src.id}] {src.title}\n"
                 f"URL: {src.url}\n"
-                f"Content: {src.content[:1500] if src.content else '(no content)'}\n"
+                f"Content: {content}\n"
             )
         return "\n".join(parts)
 

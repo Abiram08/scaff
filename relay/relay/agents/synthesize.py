@@ -4,6 +4,8 @@ from __future__ import annotations
 from ..llm import LLMClient, ChatMessage
 from ..types import Claim, Source
 
+SOURCE_CONTENT_MAX_CHARS = 500  # match verify agent
+
 
 class SynthesizeAgent:
     def __init__(self, llm: LLMClient):
@@ -53,7 +55,7 @@ class SynthesizeAgent:
             [system, user],
             model=model,
             temperature=0.3,
-            max_tokens=4096,
+            max_tokens=2048,
         )
 
         tldr, body = self._parse_report(resp.content)
@@ -62,10 +64,11 @@ class SynthesizeAgent:
     def _format_sources(self, sources: list[Source]) -> str:
         parts = []
         for src in sources:
+            content = src.content[:SOURCE_CONTENT_MAX_CHARS] if src.content else "(no content)"
             parts.append(
                 f"[{src.id}] {src.title}\n"
                 f"URL: {src.url}\n"
-                f"Content: {src.content[:1500] if src.content else '(no content)'}\n"
+                f"Content: {content}\n"
             )
         return "\n".join(parts)
 
@@ -120,7 +123,7 @@ class SynthesizeAgent:
             else:
                 body += trimmed + "\n"
 
-        if known.strip() and not known.strip().lower().eq("none"):
+        if known.strip() and known.strip().lower() != "none":
             body += "\n\n## Known Unknowns\n\n" + known.strip()
 
         return tldr.strip(), body.strip()

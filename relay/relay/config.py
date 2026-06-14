@@ -20,25 +20,34 @@ class SearchConfig:
     web_provider: str = "tavily"
     harness_corpus_top_k: int = 8
     web_top_k: int = 5
-    max_search_queries: int = 6
+    max_search_queries: int = 4
+
+
+@dataclass
+class EmbeddingConfig:
+    model: str = "text-embedding-3-small"
+    provider: str = "openai"
+    chunk_size: int = 512
+    chunk_overlap: int = 64
 
 
 @dataclass
 class CorpusConfig:
     db_path: str = "./corpus/harness.db"
     refresh_interval_hours: int = 168
+    embedding: EmbedingConfig = field(default_factory=EmbedingConfig)
 
 
 @dataclass
 class VerificationConfig:
     min_sources_for_high: int = 2
-    flag_contradictions: bool = true
+    flag_contradictions: bool = True
 
 
 @dataclass
 class StreamingConfig:
     chunk_on: str = "sub_question_complete"
-    enable_user_commands: bool = true
+    enable_user_commands: bool = True
 
 
 @dataclass

@@ -18,9 +18,10 @@
 10. [Tech Stack](#10-tech-stack)
 11. [Directory Structure](#11-directory-structure)
 12. [Configuration](#12-configuration)
-13. [Extending the Agent](#13-extending-the-agent)
-14. [Failure Modes & Guardrails](#14-failure-modes--guardrails)
-15. [Roadmap](#15-roadmap)
+13. [Color System & Design Tokens](#13-color-system--design-tokens)
+14. [Extending the Agent](#14-extending-the-agent)
+15. [Failure Modes & Guardrails](#15-failure-modes--guardrails)
+16. [Roadmap](#16-roadmap)
 
 ---
 
@@ -584,7 +585,83 @@ port = 8000
 
 ---
 
-## 13. Extending the Agent
+## 13. Color System & Design Tokens
+
+Relay uses a unified color system across all layers — Web UI (React + Tailwind), Rust CLI, and Python backend. Tokens are the single source of truth.
+
+### 13.1 Brand Palette
+
+| Token | Hex | Usage |
+|---|---|---|
+| `relay-400` (light) | `#818cf8` | Hover states, secondary accents, links |
+| `relay-500` (primary) | `#6366f1` | Primary brand color, buttons, active states, scrollbars |
+| `relay-600` (dark) | `#3730a3` | Gradients, deep backgrounds |
+| `accent` | `#a855f7` | Violet secondary accent, highlights |
+| `warm` | `#f59e0b` | Amber warm contrast, sparingly |
+
+### 13.2 Neutral / Surface Palette (Dark Theme)
+
+| Token | Hex | Usage |
+|---|---|---|
+| `dark-950` | `#0b0b12` | Page background (indigo tint) |
+| `dark-900` | `#12121e` | Card / surface background |
+| `dark-850` | `#2a2a2a` | Elevated surface |
+| `dark-800` | `#3d3d3d` | Borders, separators |
+| `dark-700` | `#4f4f4f` | Muted text |
+| `dark-400` | `#888888` | Disabled / placeholder text |
+| `dark-100` | `#e7e7e7` | Body text |
+| white | `#ffffff` | Headings, primary text |
+
+### 13.3 Confidence Colors
+
+| Level | Hex | Emoji | Condition |
+|---|---|---|---|
+| `high` | `#10b981` (emerald) | ✅ | ≥2 independent sources agree |
+| `medium` | `#f59e0b` (amber) | ⚠️ | Single source, or 2+ with minor variation |
+| `low` | `#f97316` (orange) | 🔴 | Single source, limited corroboration |
+| `contested` | `#ef4444` (red) | ⚡ | Multiple sources directly contradict |
+
+### 13.4 Pipeline Stage Status Colors
+
+| Stage | Hex |
+|---|---|
+| `planning` | `#fbbf24` (amber-400) |
+| `searching` | `#6366f1` (relay primary) |
+| `verifying` | `#a855f7` (purple) |
+| `synthesizing` | `#06b6d4` (cyan) |
+| `done` | `#10b981` (emerald) |
+| `error` | `#ef4444` (red) |
+
+### 13.5 Glass / Surface Effects
+
+```
+glass-bg:      rgba(15, 15, 25, 0.85)
+glass-border:  rgba(99, 102, 241, 0.15)    — relay-500 at 15%
+glass-blur:    blur(16px)
+orb-glow:      filter: blur(80px)
+mesh-grid:     rgba(255,255,255,0.04) at 48px intervals
+```
+
+### 13.6 Implementation by Layer
+
+| Layer | Location | Mechanism |
+|---|---|---|
+| Web UI | `web/tailwind.config.js` + `web/src/index.css` | CSS custom properties + Tailwind `theme.extend.colors` |
+| Rust CLI | `src/display.rs` | `console` crate with `Color::Rgb` true-color support; falls back to ANSI on unsupported terminals |
+| Python | `relay/relay/display.py` | Rich/termcolor for terminal; CSS for HTML reports |
+
+### 13.7 Token Mapping Rules
+
+- **All brand accents** use `relay-500` (`#6366f1`) as the primary.
+- **All confidence badges** use the confidence colors above — never substitute.
+- **All pipeline stage indicators** use the status colors above.
+- **Surface backgrounds** use `dark-950` for page, `dark-900` for cards, `dark-850` for elevated.
+- **Borders** default to `dark-800` unless accenting with `relay-500` at 15–20% opacity.
+- **Violet accent** (`#a855f7`) used for secondary highlights / /deepen and /redirect buttons.
+
+---
+
+## 14. Extending the Agent
 
 ### Adding a New Corpus Source
 
@@ -610,7 +687,7 @@ class MyLLMClient(LLMClient):
 
 ---
 
-## 14. Failure Modes & Guardrails
+## 15. Failure Modes & Guardrails
 
 | Failure | Detection | Handling |
 |---|---|---|
@@ -623,7 +700,7 @@ class MyLLMClient(LLMClient):
 
 ---
 
-## 15. Roadmap
+## 16. Roadmap
 
 ### v0.1 — Core Pipeline (MVP)
 - [ ] Plan Agent with sub-question decomposition

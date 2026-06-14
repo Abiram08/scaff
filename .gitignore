@@ -9,6 +9,7 @@ node_modules/
 web/dist/
 web/node_modules/
 web/package-lock.json
+web/.astro/
 
 # Python / Relay backend
 **/__pycache__/
@@ -17,6 +18,15 @@ web/package-lock.json
 *.egg-info/
 *.egg
 relay/corpus/harness.db
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+*.cover
+
+# Memory store (user data, not code)
+memory/
+memory.db
 
 # Local config / corpus database
 *.db

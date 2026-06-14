@@ -17,12 +17,12 @@ export function FindingCard({ finding, index }: FindingCardProps) {
       animationDelay: `${index * 80}ms`,
       background: 'rgba(25, 25, 40, 0.9)',
       backdropFilter: 'blur(12px)',
-      border: '1px solid rgba(34, 0, 255, 0.15)',
+      border: '1px solid rgba(99, 102, 241, 0.15)',
     }}>
       <div className="flex items-start justify-between gap-4 mb-4">
         <div className="flex items-center gap-3">
           <span className="flex items-center justify-center w-8 h-8 rounded-lg text-sm text-white"
-            style={{ background: 'rgba(34, 0, 255, 0.2)' }}>
+            style={{ background: 'rgba(99, 102, 241, 0.2)' }}>
             {index}
           </span>
           <ConfidenceBadge confidence={finding.confidence} />
