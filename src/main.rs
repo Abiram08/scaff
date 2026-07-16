@@ -17,12 +17,27 @@ fn main() {
         eprintln!();
         if msg.contains("API key") {
             eprintln!("  {} {}", console::style("✗").red().bold(), msg);
-            eprintln!("  {} Set one via: scaff setup or scaff config set-key <provider> <KEY>", console::style("→").dim());
-            eprintln!("  {} Or set the env var: export OPENAI_API_KEY=sk-...", console::style("→").dim());
-        } else if msg.contains("research failed") {
+            eprintln!(
+                "  {} Set one via: scaff setup or scaff config set-key <provider> <KEY>",
+                console::style("→").dim()
+            );
+            eprintln!(
+                "  {} Or set the env var: export OPENAI_API_KEY=sk-...",
+                console::style("→").dim()
+            );
+        } else if msg.contains("agent failed")
+            || msg.contains("research failed")
+            || msg.contains("LLM request failed")
+        {
             eprintln!("  {} {}", console::style("✗").red().bold(), msg);
-            eprintln!("  {} Try: scaff doctor to check your setup", console::style("→").dim());
-            eprintln!("  {} Or: scaff setup to reconfigure", console::style("→").dim());
+            eprintln!(
+                "  {} Try: scaff doctor to check your setup",
+                console::style("→").dim()
+            );
+            eprintln!(
+                "  {} Or: scaff setup to reconfigure",
+                console::style("→").dim()
+            );
         } else {
             eprintln!("  {} {}", console::style("ERROR").red().bold(), msg);
         }

@@ -3,9 +3,9 @@ use std::io::{self, BufRead, Write};
 use anyhow::Result;
 use serde_json::{json, Value};
 
+use crate::agent::{self, AgentOptions, UseCase};
 use crate::config::{self, ScaffConfig};
 use crate::corpus;
-use crate::research::{self, ResearchOptions};
 use crate::search::Index;
 
 /// Run the MCP stdio server. Exits when stdin closes.
@@ -150,21 +150,25 @@ pub fn run() -> Result<()> {
 
 fn handle_research(question: &str) -> Result<String> {
     let cfg = ScaffConfig::load();
-    let provider = config::resolve_provider(Some(&cfg.default_provider))
-        .map_err(anyhow::Error::msg)?;
-    let api_key = config::require_api_key(provider, &cfg)
-        .map_err(anyhow::Error::msg)?;
+    let provider =
+        config::resolve_provider(Some(&cfg.default_provider)).map_err(anyhow::Error::msg)?;
+    let api_key = config::require_api_key(provider, &cfg).map_err(anyhow::Error::msg)?;
     let model = config::resolve_model(provider, Some(&cfg.model), cfg.cheap);
     let conn = corpus::open_db()?;
     let chunks = corpus::load_all_chunks(&conn)?;
     let index = Index::build(chunks);
-    let mut options = ResearchOptions {
+    let options = AgentOptions {
+        use_case: UseCase::Ask,
         retrieval_k: cfg.retrieval_k,
         web_enabled: cfg.web_enabled,
         model,
-        ..Default::default()
+        temperature: 0.2,
+        max_output_tokens: 2048,
+        max_steps: 8,
+        show_stages: false,
+        show_cost: false,
     };
-    let out = research::run_research(question, &cfg, provider, Some(&api_key), &index, &mut options)?;
+    let out = agent::run(question, provider, Some(&api_key), &index, &options)?;
     Ok(out.report)
 }
 

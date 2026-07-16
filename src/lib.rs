@@ -1,6 +1,6 @@
-//! Library facade for the `scaff` binary. Exposes modules for integration tests
-//! and for embedding the research agent in other tools (including the MCP server).
+//! Library facade for the `scaff` binary — Pi-style Harness research agent.
 
+pub mod agent;
 pub mod cli;
 pub mod config;
 pub mod connectors;
@@ -12,8 +12,7 @@ pub mod llm;
 pub mod local_files;
 pub mod mcp;
 pub mod pipeline;
-pub mod render;
 pub mod repl;
-pub mod research;
+pub mod report;
 pub mod search;
 pub mod web;

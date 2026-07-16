@@ -2,7 +2,7 @@
 name = "scaff"
 version = "1.0.0"
 edition = "2021"
-description = "Harness Research Agent — a verticalized deep-research CLI for the Harness platform."
+description = "Pi-simple Harness research agent — four tools, one loop, cited answers."
 authors = ["scaff contributors"]
 license = "MIT"
 
@@ -26,7 +26,6 @@ sha2 = "0.10"
 ureq = { version = "2.10", features = ["json"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 scraper = "0.20"
-pulldown-cmark = "0.12"
 anyhow = "1"
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde", "clock"] }

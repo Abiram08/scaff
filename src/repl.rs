@@ -3,12 +3,11 @@ use std::io::{self, BufRead, Write};
 use anyhow::Result;
 use console::style;
 
+use crate::agent::{self, AgentOptions, UseCase};
 use crate::config::{self, ScaffConfig};
 use crate::display;
 use crate::history;
-use crate::pipeline::{self, Execution, Source};
-use crate::research::{self, ResearchOptions};
-use crate::search::SearchHit;
+use crate::pipeline::{self, Execution, Source, SourceKind};
 
 pub struct ReplState {
     pub cfg: ScaffConfig,
@@ -82,8 +81,8 @@ fn print_prompt() {
 fn setup() -> Result<ReplState> {
     crate::init::ensure_global_dirs()?;
     let cfg = ScaffConfig::load();
-    let provider = config::resolve_provider(Some(&cfg.default_provider))
-        .map_err(anyhow::Error::msg)?;
+    let provider =
+        config::resolve_provider(Some(&cfg.default_provider)).map_err(anyhow::Error::msg)?;
     let api_key = config::require_api_key(provider, &cfg).map_err(anyhow::Error::msg)?;
     let model = config::resolve_model(provider, Some(&cfg.model), cfg.cheap);
     let web_enabled = cfg.web_enabled;
@@ -158,22 +157,20 @@ fn handle_slash(line: &str, state: &mut ReplState) -> Slash {
                 println!("  current provider: {}", state.provider.name);
             } else {
                 match config::resolve_provider(Some(arg)) {
-                    Ok(p) => {
-                        match config::require_api_key(p, &state.cfg) {
-                            Ok(k) => {
-                                state.provider = p;
-                                state.api_key = k;
-                                state.model = config::resolve_model(p, None, state.cfg.cheap);
-                                println!(
-                                    "  {} provider = {}, model = {}",
-                                    style("ok").green(),
-                                    p.name,
-                                    state.model
-                                );
-                            }
-                            Err(e) => display::err(&e),
+                    Ok(p) => match config::require_api_key(p, &state.cfg) {
+                        Ok(k) => {
+                            state.provider = p;
+                            state.api_key = k;
+                            state.model = config::resolve_model(p, None, state.cfg.cheap);
+                            println!(
+                                "  {} provider = {}, model = {}",
+                                style("ok").green(),
+                                p.name,
+                                state.model
+                            );
                         }
-                    }
+                        Err(e) => display::err(&e),
+                    },
                     Err(e) => display::err(&e),
                 }
             }
@@ -309,11 +306,8 @@ fn print_help() {
 }
 
 fn ask(state: &mut ReplState, question: &str) -> Result<()> {
-    if state.show_stages {
-        display::show_stage("plan", "decomposing question into sub-questions");
-    }
     let spinner_msg = if state.show_stages {
-        "plan → broad_search → verify → synthesize → render".to_string()
+        "agent · search_corpus → finish".to_string()
     } else {
         format!("researching: {question}")
     };
@@ -323,7 +317,7 @@ fn ask(state: &mut ReplState, question: &str) -> Result<()> {
     let chunks = crate::corpus::load_all_chunks(&conn)?;
     let index = if chunks.is_empty() {
         eprintln!(
-            "  {} corpus is empty — answering from LLM knowledge with reduced citations",
+            "  {} corpus is empty — answering with reduced citations",
             style("warn").yellow()
         );
         crate::search::Index::build(vec![])
@@ -331,89 +325,80 @@ fn ask(state: &mut ReplState, question: &str) -> Result<()> {
         crate::search::Index::build(chunks)
     };
 
-    let mut options = ResearchOptions {
+    let options = AgentOptions {
+        use_case: UseCase::Ask,
         retrieval_k: state.cfg.retrieval_k,
         web_enabled: state.web_enabled,
-        max_sub_questions: 4,
-        max_search_queries: 6,
         model: state.model.clone(),
-        temperature: 0.3,
+        temperature: 0.2,
         max_output_tokens: 2048,
+        max_steps: 8,
+        show_stages: state.show_stages,
         show_cost: false,
-        on_finding: None,
     };
 
-    // Hook up progressive finding display in REPL.
-    if state.show_stages {
-        options.on_finding = Some(Box::new(move |f: &pipeline::Finding| {
-            eprintln!();
-            display::finding(f);
-        }));
-    }
-
-    let out = research::run_research(
+    let out = agent::run(
         question,
-        &state.cfg,
         state.provider,
         Some(&state.api_key),
         &index,
-        &mut options,
+        &options,
     )?;
 
     spinner.finish_and_clear();
 
-    // Build a Harness-style execution record and persist it.
-    let mut exec = Execution::new("research", question);
+    let mut exec = Execution::new("ask", question);
     exec.model = options.model.clone();
     exec.provider = state.provider.name.to_string();
-    exec.input_tokens = out.stats.planner_input_tokens + out.stats.synth_input_tokens;
-    exec.output_tokens = out.stats.planner_output_tokens + out.stats.synth_output_tokens;
+    exec.input_tokens = out.stats.input_tokens;
+    exec.output_tokens = out.stats.output_tokens;
     exec.estimated_cost_usd = out.stats.estimated_cost_usd;
     exec.finished_at = Some(chrono::Utc::now());
     exec.status = pipeline::ExecutionStatus::Succeeded;
-    exec.tldr = Some(out.tldr.clone());
+    exec.tldr = Some(out.payload.tldr.clone());
 
-    // Convert research stages into pipeline stages.
-    for (name, status, dur_ms) in [
-        ("plan", pipeline::StageStatus::Ok, 0u128),
-        ("broad_search", pipeline::StageStatus::Ok, 0u128),
-        ("verify", pipeline::StageStatus::Ok, 0u128),
-        ("synthesize", pipeline::StageStatus::Ok, 0u128),
-        ("render", pipeline::StageStatus::Ok, out.stats.elapsed_ms),
-    ] {
-        let mut stage = pipeline::Stage::new(name);
-        stage.status = status;
-        stage.duration_ms = dur_ms;
+    for line in &out.steps_log {
+        let mut stage = pipeline::Stage::new("tool");
+        stage.status = pipeline::StageStatus::Ok;
         stage.finished_at = Some(chrono::Utc::now());
+        stage = stage.detail("step", line.clone());
         exec.stages.push(stage);
     }
 
-    // Capture sources.
     let mut sources: Vec<Source> = Vec::new();
-    for (i, h) in out.corpus_hits.iter().enumerate() {
+    for (i, s) in out.payload.sources.iter().enumerate() {
         sources.push(Source {
             id: i + 1,
-            title: h.chunk.title.clone(),
-            url: h.chunk.url.clone(),
-            kind: pipeline::SourceKind::Corpus,
-            score: h.score,
-        });
-    }
-    let next_id_offset = out.corpus_hits.len();
-    for (i, w) in out.web_results.iter().enumerate() {
-        sources.push(Source {
-            id: next_id_offset + i + 1,
-            title: w.title.clone(),
-            url: w.url.clone(),
-            kind: pipeline::SourceKind::Web,
+            title: s.title.clone(),
+            url: s.url.clone(),
+            kind: if s.kind == "web" {
+                SourceKind::Web
+            } else {
+                SourceKind::Corpus
+            },
             score: 0.0,
         });
     }
-    exec.sources = sources.clone();
-    exec.claims = out.claims.clone();
-    exec.verifications = out.verifications.clone();
+    exec.sources = sources;
+    exec.claims = out
+        .payload
+        .findings
+        .iter()
+        .enumerate()
+        .map(|(i, f)| pipeline::Claim {
+            id: i,
+            text: f.text.clone(),
+            source_ids: Vec::new(),
+            confidence: match f.confidence {
+                agent::Confidence::High => pipeline::Confidence::High,
+                agent::Confidence::Medium => pipeline::Confidence::Medium,
+                agent::Confidence::Low => pipeline::Confidence::Low,
+                agent::Confidence::Contested => pipeline::Confidence::Contested,
+            },
+            conflict_note: f.conflict_note.clone(),
+        })
+        .collect();
 
-    // Persist.
     let report_path = history::save_report(&exec, &out.report).ok();
     if let Some(p) = &report_path {
         exec.report_path = Some(p.display().to_string());
@@ -422,67 +407,30 @@ fn ask(state: &mut ReplState, question: &str) -> Result<()> {
 
     if state.show_stages {
         eprintln!();
-        eprintln!("  {}", style("Pipeline Summary").cyan().bold());
-        for s in &exec.stages {
-            let detail = s.details.iter()
-                .map(|(k, v)| format!("{}: {}", k, v))
-                .collect::<Vec<_>>()
-                .join(", ");
-            if detail.is_empty() {
-                display::stage_ok(&s.name, &format!("{} ms", s.duration_ms));
-            } else {
-                display::stage_ok(&s.name, &format!("{} ms — {}", s.duration_ms, detail));
-            }
+        eprintln!("  {}", style("Agent steps").cyan().bold());
+        for line in &out.steps_log {
+            eprintln!("  {} {}", style("→").dim(), line);
         }
-        eprintln!("  {}  {} — {} sources, {} claims",
-            style("✓").green(),
-            style(&exec.id).dim(),
-            exec.source_count(),
-            exec.claims.len()
-        );
         eprintln!();
     }
 
     println!("{}", out.report);
 
-    if state.show_sources {
-        print_sources(&out.corpus_hits, &out.web_results);
+    if state.show_sources && !out.payload.sources.is_empty() {
+        eprintln!();
+        eprintln!("  {}", style("Sources").cyan().bold());
+        for s in &out.payload.sources {
+            eprintln!(
+                "    {}  {}  {}",
+                style(&s.id).dim(),
+                style(&s.title).bold(),
+                style(&s.url).dim()
+            );
+        }
     }
 
     state.history.push(exec);
     Ok(())
-}
-
-fn print_sources(corpus: &[SearchHit], web: &[crate::web::WebResult]) {
-    if corpus.is_empty() && web.is_empty() {
-        return;
-    }
-    eprintln!();
-    eprintln!("  {}", style("Sources").cyan().bold());
-    let mut n = 0;
-    for h in corpus {
-        n += 1;
-        eprintln!(
-            "    [{:>2}] score={:>5.2}  {}  {}",
-            n,
-            h.score,
-            style(&h.chunk.title).bold(),
-            style(&h.chunk.url).dim()
-        );
-    }
-    for w in web {
-        n += 1;
-        eprintln!(
-            "    [{:>2}] web  {}  {}",
-            n,
-            style(&w.title).bold(),
-            style(&w.url).dim()
-        );
-    }
-    eprintln!(
-        "    {}",
-        style("Use /expand <N> to see the full source.").dim()
-    );
 }
 
 fn expand_source(state: &ReplState, n: usize) {
@@ -494,12 +442,20 @@ fn expand_source(state: &ReplState, n: usize) {
         }
     };
     if n == 0 || n > exec.sources.len() {
-        display::err(&format!("source {} not in last report (have {})", n, exec.sources.len()));
+        display::err(&format!(
+            "source {} not in last report (have {})",
+            n,
+            exec.sources.len()
+        ));
         return;
     }
     let src = &exec.sources[n - 1];
     if matches!(src.kind, pipeline::SourceKind::Web) {
-        eprintln!("  {} (web source — fetch on demand with `scaff corpus crawl {}`)", style(&src.url).dim(), src.url);
+        eprintln!(
+            "  {} (web source — fetch on demand with `scaff corpus crawl {}`)",
+            style(&src.url).dim(),
+            src.url
+        );
         return;
     }
     let conn = match crate::corpus::open_db() {
@@ -519,7 +475,11 @@ fn expand_source(state: &ReplState, n: usize) {
     let idx = crate::search::Index::build(chunks);
     let hits = idx.search_in(&src.title, 1, Some(&src.url));
     if let Some(h) = hits.first() {
-        println!("\n  {} — {}\n", style(&h.chunk.title).bold(), style(&h.chunk.url).dim());
+        println!(
+            "\n  {} — {}\n",
+            style(&h.chunk.title).bold(),
+            style(&h.chunk.url).dim()
+        );
         println!("{}\n", h.chunk.content);
     } else {
         display::err("source not found in current corpus");
@@ -557,7 +517,11 @@ fn save_current_pipeline(state: &mut ReplState, name: &str) {
     let default_name = format!("pipeline-{}", &exec.id);
     let name = if name.is_empty() { &default_name } else { name };
     match history::save_pipeline_yaml(name, &exec.question, &exec.model, &exec.provider) {
-        Ok(path) => println!("  {} saved pipeline: {}", style("ok").green(), path.display()),
+        Ok(path) => println!(
+            "  {} saved pipeline: {}",
+            style("ok").green(),
+            path.display()
+        ),
         Err(e) => display::err(&e.to_string()),
     }
 }
@@ -633,7 +597,11 @@ fn export_session(exec: &Execution) {
     md.push_str(&format!("**Status:** {:?}\n", exec.status));
     md.push_str(&format!("**Duration:** {} ms\n", exec.total_duration_ms()));
     md.push_str(&format!("**Sources:** {}\n", exec.source_count()));
-    md.push_str(&format!("**Claims:** {} ({})\n", exec.claims.len(), exec.confidence_summary()));
+    md.push_str(&format!(
+        "**Claims:** {} ({})\n",
+        exec.claims.len(),
+        exec.confidence_summary()
+    ));
     md.push_str("\n---\n\n");
 
     if let Some(tldr) = &exec.tldr {
@@ -642,7 +610,10 @@ fn export_session(exec: &Execution) {
 
     md.push_str("## Pipeline Stages\n\n");
     for stage in &exec.stages {
-        md.push_str(&format!("- **{}**: {:?} ({} ms)\n", stage.name, stage.status, stage.duration_ms));
+        md.push_str(&format!(
+            "- **{}**: {:?} ({} ms)\n",
+            stage.name, stage.status, stage.duration_ms
+        ));
     }
     md.push_str("\n");
 
@@ -650,7 +621,10 @@ fn export_session(exec: &Execution) {
         md.push_str("## Claims & Confidence\n\n");
         for claim in &exec.claims {
             let emoji = claim.confidence.emoji();
-            md.push_str(&format!("- {} [{}] {}\n", emoji, claim.confidence, claim.text));
+            md.push_str(&format!(
+                "- {} [{}] {}\n",
+                emoji, claim.confidence, claim.text
+            ));
             if let Some(note) = &claim.conflict_note {
                 md.push_str(&format!("  - Conflict: {}\n", note));
             }
@@ -666,11 +640,18 @@ fn export_session(exec: &Execution) {
         md.push_str("\n");
     }
 
-    md.push_str(&format!("---\n*Exported by scaff on {}*\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")));
+    md.push_str(&format!(
+        "---\n*Exported by scaff on {}*\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
+    ));
 
     let export_path = std::env::temp_dir().join(format!("scaff-export-{}.md", exec.id));
     match std::fs::write(&export_path, &md) {
-        Ok(_) => println!("  {} exported to: {}", style("ok").green(), export_path.display()),
+        Ok(_) => println!(
+            "  {} exported to: {}",
+            style("ok").green(),
+            export_path.display()
+        ),
         Err(e) => display::err(&format!("export failed: {e}")),
     }
 }

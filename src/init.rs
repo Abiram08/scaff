@@ -25,7 +25,8 @@ pub fn has_global_config() -> bool {
 
 pub fn write_global_default_config() -> Result<()> {
     let cfg = ScaffConfig::default();
-    cfg.save().map_err(|e| anyhow::anyhow!("save default config: {e}"))?;
+    cfg.save()
+        .map_err(|e| anyhow::anyhow!("save default config: {e}"))?;
     Ok(())
 }
 
@@ -38,7 +39,10 @@ pub fn auto_setup(print_status: bool) -> Result<bool> {
     // Check if we already have a working config with API keys
     let has_keys = !cfg.api_keys.is_empty()
         || config::PROVIDERS.iter().any(|p| {
-            p.requires_key && std::env::var(p.env_var).ok().is_some_and(|v| !v.trim().is_empty())
+            p.requires_key
+                && std::env::var(p.env_var)
+                    .ok()
+                    .is_some_and(|v| !v.trim().is_empty())
         });
 
     if is_first {
@@ -101,12 +105,12 @@ pub fn auto_setup(print_status: bool) -> Result<bool> {
     }
 
     if needs_save {
-        cfg.save().map_err(|e| anyhow::anyhow!("save config: {e}"))?;
+        cfg.save()
+            .map_err(|e| anyhow::anyhow!("save config: {e}"))?;
     }
 
     // Seed corpus if empty
-    let seeded = crate::corpus::ensure_seeded()
-        .map_err(|e| anyhow::anyhow!("seed corpus: {e}"))?;
+    let seeded = crate::corpus::ensure_seeded().map_err(|e| anyhow::anyhow!("seed corpus: {e}"))?;
 
     if is_first && print_status {
         println!(
@@ -148,20 +152,36 @@ pub fn run_setup_wizard() -> Result<()> {
     println!();
 
     // Step 1: Provider selection
-    println!("  {}", style("Step 1: Choose an LLM provider").cyan().bold());
+    println!(
+        "  {}",
+        style("Step 1: Choose an LLM provider").cyan().bold()
+    );
     println!();
 
     for (i, p) in config::PROVIDERS.iter().enumerate() {
         let status = if p.requires_key {
-            let from_env = std::env::var(p.env_var).ok().is_some_and(|v| !v.trim().is_empty());
-            let from_cfg = ScaffConfig::load().api_keys.get(p.name).is_some_and(|v| !v.trim().is_empty());
-            if from_env || from_cfg { "✓ configured" } else { "needs key" }
+            let from_env = std::env::var(p.env_var)
+                .ok()
+                .is_some_and(|v| !v.trim().is_empty());
+            let from_cfg = ScaffConfig::load()
+                .api_keys
+                .get(p.name)
+                .is_some_and(|v| !v.trim().is_empty());
+            if from_env || from_cfg {
+                "✓ configured"
+            } else {
+                "needs key"
+            }
         } else {
             let running = ureq::get("http://localhost:11434/api/tags")
                 .timeout(std::time::Duration::from_secs(2))
                 .call()
                 .is_ok_and(|r| r.status() == 200);
-            if running { "✓ running (no key)" } else { "not running" }
+            if running {
+                "✓ running (no key)"
+            } else {
+                "not running"
+            }
         };
         let status_color = match status.chars().next() {
             Some('✓') => style(status).green(),
@@ -185,7 +205,10 @@ pub fn run_setup_wizard() -> Result<()> {
         let n: usize = match input.trim().parse() {
             Ok(n) if n >= 1 && n <= config::PROVIDERS.len() => n,
             _ => {
-                println!("  {} Please enter a number between 1 and 5", style("!").yellow());
+                println!(
+                    "  {} Please enter a number between 1 and 5",
+                    style("!").yellow()
+                );
                 continue;
             }
         };
@@ -197,15 +220,23 @@ pub fn run_setup_wizard() -> Result<()> {
 
     // Step 2: API key
     if provider.requires_key {
-        let has_key = std::env::var(provider.env_var).ok().is_some_and(|v| !v.trim().is_empty())
-            || cfg.api_keys.get(provider.name).is_some_and(|v| !v.trim().is_empty());
+        let has_key = std::env::var(provider.env_var)
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
+            || cfg
+                .api_keys
+                .get(provider.name)
+                .is_some_and(|v| !v.trim().is_empty());
 
         if !has_key {
             println!();
             println!("  {}", style("Step 2: Enter your API key").cyan().bold());
             println!();
             println!("  Get a key at: {}", style(provider.base_url).dim());
-            println!("  (press Enter to skip, set later with `scaff config set-key {} <KEY>`)", provider.name);
+            println!(
+                "  (press Enter to skip, set later with `scaff config set-key {} <KEY>`)",
+                provider.name
+            );
             println!();
             print!("  {} ", style("API key:").dim());
             io::stdout().flush()?;
@@ -218,9 +249,14 @@ pub fn run_setup_wizard() -> Result<()> {
         }
     }
 
-    cfg.save().map_err(|e| anyhow::anyhow!("save config: {e}"))?;
+    cfg.save()
+        .map_err(|e| anyhow::anyhow!("save config: {e}"))?;
     println!();
-    println!("  {} Configuration saved to {}", style("✓").green(), ScaffConfig::config_path().display());
+    println!(
+        "  {} Configuration saved to {}",
+        style("✓").green(),
+        ScaffConfig::config_path().display()
+    );
 
     // Step 3: Seed corpus
     println!();
@@ -229,7 +265,11 @@ pub fn run_setup_wizard() -> Result<()> {
     io::stdout().flush()?;
     let n = crate::corpus::ensure_seeded()?;
     println!("{} entries", style(n).cyan());
-    println!("  {} Corpus ready at {}", style("✓").green(), ScaffConfig::corpus_db_path().display());
+    println!(
+        "  {} Corpus ready at {}",
+        style("✓").green(),
+        ScaffConfig::corpus_db_path().display()
+    );
 
     // Step 4: Test connection
     println!();
@@ -237,9 +277,7 @@ pub fn run_setup_wizard() -> Result<()> {
     print!("  {} ", style("Testing...").dim());
     io::stdout().flush()?;
 
-    let api_key = config::resolve_api_key(provider, &cfg)
-        .ok()
-        .flatten();
+    let api_key = config::resolve_api_key(provider, &cfg).ok().flatten();
     let model = config::resolve_model(provider, None, false);
 
     let test_passed = crate::llm::chat(
@@ -249,6 +287,7 @@ pub fn run_setup_wizard() -> Result<()> {
         &[crate::llm::ChatMessage::user("Say exactly: OK")],
         0.0,
         50,
+        &[],
     )
     .map(|r| !r.content.is_empty())
     .unwrap_or(false);
@@ -324,7 +363,7 @@ pub fn print_welcome() {
     println!("  Welcome to scaff — the Harness Research Agent.");
     println!("{}", bar);
     println!();
-    println!("  scaff is a verticalized deep-research CLI for the Harness platform.");
+    println!("  scaff is a Pi-simple Harness research agent (four tools, one loop).");
     println!("  Ask a question, get a cited Markdown report.");
     println!();
     println!("  Quick start:");

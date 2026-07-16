@@ -26,7 +26,8 @@ pub fn save_execution(exec: &Execution) -> Result<PathBuf> {
     ensure_dirs()?;
     let path = execution_path(&exec.id);
     let body = serde_json::to_string_pretty(exec).context("serialize execution")?;
-    crate::config::write_atomic(&path, &body).map_err(|e| anyhow::anyhow!("write execution file: {e}"))?;
+    crate::config::write_atomic(&path, &body)
+        .map_err(|e| anyhow::anyhow!("write execution file: {e}"))?;
     Ok(path)
 }
 
@@ -168,19 +169,25 @@ pub fn delete_execution(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn save_pipeline_yaml(name: &str, question: &str, model: &str, provider: &str) -> Result<PathBuf> {
+pub fn save_pipeline_yaml(
+    name: &str,
+    question: &str,
+    model: &str,
+    provider: &str,
+) -> Result<PathBuf> {
     let dir = ScaffConfig::config_dir().join("pipelines");
     fs::create_dir_all(&dir).ok();
     let path = dir.join(format!("{name}.yaml"));
     let body = format!(
-        "# scaff pipeline: {name}\n# created: {}\n\nname: {name}\ndescription: {question}\npipeline: research\nprovider: {provider}\nmodel: {model}\nvariables:\n  - name: question\n    default: \"{question}\"\nstages:\n  - plan\n  - search\n  - synthesize\n  - render\nsources:\n  - corpus\n  - web\n",
+        "# scaff saved prompt: {name}\n# created: {}\n\nname: {name}\ndescription: {question}\nuse_case: ask\nprovider: {provider}\nmodel: {model}\nvariables:\n  - name: question\n    default: \"{question}\"\ntools:\n  - search_corpus\n  - web_search\n  - fetch_url\n  - finish\n",
         Utc::now().to_rfc3339(),
         name = name,
         question = question.replace('"', "\\\""),
         provider = provider,
         model = model,
     );
-    crate::config::write_atomic(&path, &body).map_err(|e| anyhow::anyhow!("write pipeline file: {e}"))?;
+    crate::config::write_atomic(&path, &body)
+        .map_err(|e| anyhow::anyhow!("write pipeline file: {e}"))?;
     Ok(path)
 }
 

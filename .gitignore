@@ -58,5 +58,13 @@ Thumbs.db
 .env.local
 .env.*
 
+# Agent / editor instruction files (local only)
+CLAUDE.md
+claude.md
+AGENTS.md
+agents.md
+.claude/
+.grok/
+
 # Logs
 *.log

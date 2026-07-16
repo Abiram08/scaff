@@ -109,19 +109,31 @@ fn render_with_real_hits() {
     let index = Index::build(chunks);
     let hits = index.search("canary percentage rollout", 3);
     assert!(!hits.is_empty());
-    let report = scaff::render::render_report(
-        "What is the recommended canary sequence?",
-        "Start at 10% and advance through 25%, 50%, then 100% with verification gates.",
-        "## Body\n\nCanary splits traffic by percentage [1]. The recommended starter sequence is 10% -> 25% -> 50% -> 100% [1].",
-        &hits,
-        &[],
-        &[],
-    );
+    let payload = scaff::agent::FinishPayload {
+        tldr: "Start at 10% and advance through 25%, 50%, then 100% with verification gates."
+            .into(),
+        findings: vec![scaff::agent::Finding {
+            text: format!(
+                "Canary splits traffic by percentage; seed hit: {}",
+                hits[0].chunk.title
+            ),
+            confidence: scaff::agent::Confidence::High,
+            source_ids: vec![format!("corpus:{}", hits[0].chunk.id)],
+            conflict_note: None,
+        }],
+        known_unknowns: vec![],
+        sources: vec![scaff::agent::SourceRef {
+            id: format!("corpus:{}", hits[0].chunk.id),
+            title: hits[0].chunk.title.clone(),
+            url: hits[0].chunk.url.clone(),
+            kind: "corpus".into(),
+        }],
+    };
+    let report = scaff::report::render(&payload);
     assert!(report.contains("## TL;DR"));
     assert!(report.contains("## Findings"));
     assert!(report.contains("## Sources"));
-    assert!(report.contains("[1]"));
-    assert!(report.contains("canary"));
+    assert!(report.contains("canary") || report.to_lowercase().contains("canary"));
 }
 
 #[test]

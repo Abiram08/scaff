@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
 
+use crate::agent::{self, AgentOptions, UseCase};
 use crate::config::{self, ScaffConfig};
 use crate::connectors;
 use crate::corpus;
@@ -12,28 +13,28 @@ use crate::history;
 use crate::init;
 use crate::mcp;
 use crate::pipeline::{self, Execution, Source, SourceKind};
-use crate::render;
 use crate::repl;
-use crate::research::{self, ResearchOptions};
 use crate::search::Index;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "scaff",
     version,
-    about = "Harness Research Agent — cited answers about the Harness platform.",
-    long_about = "scaff is a verticalized deep-research CLI for the Harness platform. \
-                  Ask a question, get a cited Markdown report.\n\
+    about = "Pi-simple Harness research agent — cited answers, four tools, one loop.",
+    long_about = "scaff is a production research CLI for the Harness platform.\n\
+                  Tiny agent loop (like Pi): short prompt, four tools, cited report.\n\
                   \n  \
                   Quick start:  scaff \"What is Harness Continuous Delivery?\"\n  \
-                  Setup wizard: scaff setup\n  \
-                  Interactive:   scaff chat\n  \
-                  Diagnostics:   scaff doctor\n\
+                  Compare:      scaff compare \"canary vs blue/green in Harness\"\n  \
+                  How-to:       scaff howto \"set up a CD pipeline\"\n  \
+                  Setup:        scaff setup\n  \
+                  Interactive:  scaff chat\n  \
+                  Diagnostics:  scaff doctor\n\
                   \n  \
-                  Supports OpenAI, Anthropic, Gemini, Groq, and Ollama providers. \
-                  API keys auto-detected from environment variables.",
+                  Tools: search_corpus · web_search · fetch_url · finish\n\
+                  Providers: OpenAI, Anthropic, Gemini, Groq, Ollama (API keys from env).",
     subcommand_required = false,
-    arg_required_else_help = false,
+    arg_required_else_help = false
 )]
 pub struct Cli {
     /// Provider: openai, anthropic, gemini, groq, ollama.
@@ -52,15 +53,15 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub show_cost: bool,
 
-    /// Show pipeline stages (plan → search → synthesize → render) as they run.
+    /// Show agent tool steps as they run (search_corpus → finish).
     #[arg(long, global = true)]
     pub stages: bool,
 
-    /// Show the source list before the report body.
+    /// Show the source list after the report body.
     #[arg(long, global = true)]
     pub show_sources: bool,
 
-    /// Number of corpus chunks to retrieve per sub-question.
+    /// Number of corpus chunks to retrieve per search.
     #[arg(short = 'k', long, global = true)]
     pub retrieval_k: Option<usize>,
 
@@ -85,12 +86,16 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
-    /// Run a research query. Alias for the default form: `scaff "..."`.
+    /// Product Q&A with citations (default). Alias: `scaff "..."`.
     Ask {
         /// The research question.
         question: Vec<String>,
     },
-    /// Same as `ask`, but explicit.
+    /// Structured comparison (A vs B, Harness vs X, canary vs blue/green).
+    Compare { question: Vec<String> },
+    /// Steps, setup, or troubleshooting guidance.
+    Howto { question: Vec<String> },
+    /// Alias for `ask` (compat).
     Research {
         /// The research question.
         question: Vec<String>,
@@ -104,9 +109,7 @@ pub enum Commands {
         limit: usize,
     },
     /// Reprint a saved research report by execution id (or `:n` index from history).
-    Show {
-        id: String,
-    },
+    Show { id: String },
     /// Manage data sources (corpus, web, local files).
     Connector {
         #[command(subcommand)]
@@ -131,9 +134,7 @@ pub enum Commands {
     /// Start an MCP stdio server exposing the `research` tool.
     Mcp,
     /// Generate shell completions.
-    Completions {
-        shell: String,
-    },
+    Completions { shell: String },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -192,12 +193,10 @@ pub fn execute(cli: Cli) -> Result<(), String> {
     if cli.command.is_none() {
         if let Some(q) = cli.question.as_ref() {
             if q.trim().is_empty() {
-                // bare `scaff` → start the REPL
                 return cmd_chat();
             }
-            return cmd_research(&cli, q);
+            return cmd_agent(&cli, q, UseCase::Ask);
         }
-        // bare `scaff` with no args → REPL
         return cmd_chat();
     }
 
@@ -207,14 +206,28 @@ pub fn execute(cli: Cli) -> Result<(), String> {
             if q.is_empty() {
                 return Err("Usage: scaff ask <question>".to_string());
             }
-            cmd_research(&cli, &q)
+            cmd_agent(&cli, &q, UseCase::Ask)
+        }
+        Commands::Compare { question } => {
+            let q = question.join(" ");
+            if q.is_empty() {
+                return Err("Usage: scaff compare <question>".to_string());
+            }
+            cmd_agent(&cli, &q, UseCase::Compare)
+        }
+        Commands::Howto { question } => {
+            let q = question.join(" ");
+            if q.is_empty() {
+                return Err("Usage: scaff howto <question>".to_string());
+            }
+            cmd_agent(&cli, &q, UseCase::Howto)
         }
         Commands::Research { question } => {
             let q = question.join(" ");
             if q.is_empty() {
                 return Err("Usage: scaff research <question>".to_string());
             }
-            cmd_research(&cli, &q)
+            cmd_agent(&cli, &q, UseCase::Ask)
         }
         Commands::Chat => cmd_chat(),
         Commands::History { limit } => cmd_history(*limit),
@@ -243,7 +256,10 @@ fn cmd_chat() -> Result<(), String> {
 fn cmd_history(limit: usize) -> Result<(), String> {
     let execs = history::list_executions(limit).map_err(|e| format!("history: {e}"))?;
     if execs.is_empty() {
-        println!("\n  {} no executions yet — try: scaff \"what is Harness CD?\"", style("!").yellow());
+        println!(
+            "\n  {} no executions yet — try: scaff \"what is Harness CD?\"",
+            style("!").yellow()
+        );
         return Ok(());
     }
     display::section("Execution history");
@@ -254,7 +270,11 @@ fn cmd_history(limit: usize) -> Result<(), String> {
             pipeline::ExecutionStatus::Running => style("...").yellow(),
         };
         let when = e.started_at.format("%Y-%m-%d %H:%M").to_string();
-        let model = if e.model.is_empty() { "?".to_string() } else { e.model.clone() };
+        let model = if e.model.is_empty() {
+            "?".to_string()
+        } else {
+            e.model.clone()
+        };
         println!(
             "  {:>3}. [{}] {}  {}  {}  ${:.4}  {}",
             i + 1,
@@ -372,17 +392,25 @@ fn cmd_init() -> Result<(), String> {
         init::SCAFF_PROJECT_FILE,
         cwd.display()
     ));
-    display::kv("next", "edit .scaff.yaml, then run `scaff connector add-dir ./docs` to index your local docs");
+    display::kv(
+        "next",
+        "edit .scaff.yaml, then run `scaff connector add-dir ./docs` to index your local docs",
+    );
     Ok(())
 }
 
-fn cmd_research(cli: &Cli, question: &str) -> Result<(), String> {
+fn cmd_agent(cli: &Cli, question: &str, use_case: UseCase) -> Result<(), String> {
     let question = question.trim();
     if question.is_empty() || question.len() < 3 {
-        return Err("Question must be at least 3 characters. Try: scaff \"what is Harness CD?\"".to_string());
+        return Err(
+            "Question must be at least 3 characters. Try: scaff \"what is Harness CD?\"".into(),
+        );
     }
     if question.len() > 5000 {
-        return Err(format!("Question is too long ({} chars, max 5000)", question.len()));
+        return Err(format!(
+            "Question is too long ({} chars, max 5000)",
+            question.len()
+        ));
     }
 
     let cfg = ScaffConfig::load();
@@ -398,117 +426,98 @@ fn cmd_research(cli: &Cli, question: &str) -> Result<(), String> {
     let chunks = corpus::load_all_chunks(&conn).map_err(|e| format!("load corpus: {e}"))?;
     let index = Index::build(chunks.clone());
 
-    if chunks.is_empty() && cli.verbose {
+    if chunks.is_empty() {
         eprintln!(
-            "  {} corpus is empty — answers will rely on LLM knowledge",
+            "  {} corpus is empty — agent will rely on web (if enabled) and model knowledge",
             style("warn").yellow()
         );
     }
 
-    let retrieval_k = cli.retrieval_k.unwrap_or(cfg.retrieval_k).max(1);
-    let mut options = ResearchOptions {
-        retrieval_k,
+    let options = AgentOptions {
+        use_case,
+        retrieval_k: cli.retrieval_k.unwrap_or(cfg.retrieval_k).max(1),
         web_enabled: !cli.no_web && cfg.web_enabled,
-        max_sub_questions: 4,
-        max_search_queries: 6,
         model: model.clone(),
-        temperature: 0.3,
+        temperature: 0.2,
         max_output_tokens: 2048,
+        max_steps: 8,
+        show_stages: cli.stages || cli.verbose,
         show_cost: cli.show_cost || cfg.show_cost,
-        on_finding: None,
     };
 
-    if cli.stages {
-        eprintln!();
-        display::show_stage("plan", "decomposing question into sub-questions");
-    }
-
-    // Hook up progressive finding display.
-    if cli.stages || cli.verbose {
-        options.on_finding = Some(Box::new(move |f: &pipeline::Finding| {
-            eprintln!();
-            display::finding(f);
-        }));
-    }
-
-    let spinner_msg = if cli.stages {
-        "plan → broad_search → verify → synthesize → render".to_string()
+    let spinner_msg = if options.show_stages {
+        format!(
+            "{} · search_corpus → web_search → fetch_url → finish",
+            use_case.as_str()
+        )
     } else {
-        format!("Researching \"{question}\"...")
+        format!("{}: \"{question}\"...", use_case.as_str())
     };
     let spinner = display::create_spinner(&spinner_msg);
-    let result = research::run_research(question, &cfg, provider, Some(&api_key), &index, &mut options)
-        .map_err(|e| format!("research failed: {e}"))?;
+    let result = agent::run(question, provider, Some(&api_key), &index, &options)
+        .map_err(|e| format!("agent failed: {e}"))?;
     spinner.finish_and_clear();
 
-    // Build execution record (auto-save to ~/.scaff/reports and executions).
-    let mut exec = Execution::new("research", question);
+    let mut exec = Execution::new(use_case.pipeline_name(), question);
     exec.model = model.clone();
     exec.provider = provider.name.to_string();
-    exec.input_tokens = result.stats.planner_input_tokens + result.stats.synth_input_tokens;
-    exec.output_tokens = result.stats.planner_output_tokens + result.stats.synth_output_tokens;
+    exec.input_tokens = result.stats.input_tokens;
+    exec.output_tokens = result.stats.output_tokens;
     exec.estimated_cost_usd = result.stats.estimated_cost_usd;
     exec.finished_at = Some(chrono::Utc::now());
     exec.status = pipeline::ExecutionStatus::Succeeded;
-    exec.tldr = Some(result.tldr.clone());
+    exec.tldr = Some(result.payload.tldr.clone());
 
-    let mut plan_stage = pipeline::Stage::new("plan");
-    plan_stage.status = pipeline::StageStatus::Ok;
-    plan_stage.finished_at = Some(chrono::Utc::now());
-    plan_stage = plan_stage.detail("sub_questions", result.stats.sub_questions as u64);
-    exec.stages.push(plan_stage);
-
-    let mut search_stage = pipeline::Stage::new("broad_search");
-    search_stage.status = pipeline::StageStatus::Ok;
-    search_stage.finished_at = Some(chrono::Utc::now());
-    search_stage = search_stage.detail("corpus_hits", result.stats.corpus_chunks_retrieved as u64);
-    search_stage = search_stage.detail("web_results", result.stats.web_results_retrieved as u64);
-    search_stage = search_stage.detail("search_queries", result.stats.search_queries as u64);
-    exec.stages.push(search_stage);
-
-    let mut verify_stage = pipeline::Stage::new("verify");
-    verify_stage.status = pipeline::StageStatus::Ok;
-    verify_stage.finished_at = Some(chrono::Utc::now());
-    verify_stage = verify_stage.detail("claims", result.stats.claims_extracted as u64);
-    verify_stage = verify_stage.detail("verified", result.stats.claims_verified as u64);
-    exec.stages.push(verify_stage);
-
-    let mut synth_stage = pipeline::Stage::new("synthesize");
-    synth_stage.status = pipeline::StageStatus::Ok;
-    synth_stage.finished_at = Some(chrono::Utc::now());
-    synth_stage = synth_stage.detail("input_tokens", exec.input_tokens as u64);
-    synth_stage = synth_stage.detail("output_tokens", exec.output_tokens as u64);
-    exec.stages.push(synth_stage);
-
-    let mut render_stage = pipeline::Stage::new("render");
-    render_stage.status = pipeline::StageStatus::Ok;
-    render_stage.duration_ms = result.stats.elapsed_ms;
-    render_stage.finished_at = Some(chrono::Utc::now());
-    exec.stages.push(render_stage);
+    for line in &result.steps_log {
+        let mut stage = pipeline::Stage::new("tool");
+        stage.status = pipeline::StageStatus::Ok;
+        stage.finished_at = Some(chrono::Utc::now());
+        stage = stage.detail("step", line.clone());
+        exec.stages.push(stage);
+    }
+    let mut finish_stage = pipeline::Stage::new("finish");
+    finish_stage.status = pipeline::StageStatus::Ok;
+    finish_stage.duration_ms = result.stats.elapsed_ms;
+    finish_stage.finished_at = Some(chrono::Utc::now());
+    finish_stage = finish_stage.detail("findings", result.payload.findings.len() as u64);
+    finish_stage = finish_stage.detail("tool_calls", result.stats.tool_calls as u64);
+    exec.stages.push(finish_stage);
 
     let mut sources: Vec<Source> = Vec::new();
-    for (i, h) in result.corpus_hits.iter().enumerate() {
+    for (i, s) in result.payload.sources.iter().enumerate() {
+        let kind = if s.kind == "web" {
+            SourceKind::Web
+        } else {
+            SourceKind::Corpus
+        };
         sources.push(Source {
             id: i + 1,
-            title: h.chunk.title.clone(),
-            url: h.chunk.url.clone(),
-            kind: SourceKind::Corpus,
-            score: h.score,
-        });
-    }
-    let offset = result.corpus_hits.len();
-    for (i, w) in result.web_results.iter().enumerate() {
-        sources.push(Source {
-            id: offset + i + 1,
-            title: w.title.clone(),
-            url: w.url.clone(),
-            kind: SourceKind::Web,
+            title: s.title.clone(),
+            url: s.url.clone(),
+            kind,
             score: 0.0,
         });
     }
     exec.sources = sources;
-    exec.claims = result.claims.clone();
-    exec.verifications = result.verifications.clone();
+
+    exec.claims = result
+        .payload
+        .findings
+        .iter()
+        .enumerate()
+        .map(|(i, f)| pipeline::Claim {
+            id: i,
+            text: f.text.clone(),
+            source_ids: Vec::new(),
+            confidence: match f.confidence {
+                agent::Confidence::High => pipeline::Confidence::High,
+                agent::Confidence::Medium => pipeline::Confidence::Medium,
+                agent::Confidence::Low => pipeline::Confidence::Low,
+                agent::Confidence::Contested => pipeline::Confidence::Contested,
+            },
+            conflict_note: f.conflict_note.clone(),
+        })
+        .collect();
 
     let saved_report = history::save_report(&exec, &result.report).ok();
     if let Some(p) = &saved_report {
@@ -516,32 +525,34 @@ fn cmd_research(cli: &Cli, question: &str) -> Result<(), String> {
     }
     history::save_execution(&exec).ok();
 
-    // Output: stage progress
-    if cli.stages {
+    if options.show_stages {
         eprintln!();
-        eprintln!("  {}", style("Pipeline Summary").cyan().bold());
-        for s in &exec.stages {
-            let detail = s.details.iter()
-                .map(|(k, v)| format!("{}: {}", k, v))
-                .collect::<Vec<_>>()
-                .join(", ");
-            if detail.is_empty() {
-                display::stage_ok(&s.name, &format!("{} ms", s.duration_ms));
-            } else {
-                display::stage_ok(&s.name, &format!("{} ms — {}", s.duration_ms, detail));
-            }
+        eprintln!("  {}", style("Agent steps").cyan().bold());
+        for line in &result.steps_log {
+            eprintln!("  {} {}", style("→").dim(), line);
         }
-        eprintln!("  {}  {} — {} sources, {} claims",
+        eprintln!(
+            "  {}  {} — {} findings, {} tool calls, {} ms",
             style("✓").green(),
             style(&exec.id).dim(),
-            exec.source_count(),
-            exec.claims.len()
+            result.payload.findings.len(),
+            result.stats.tool_calls,
+            result.stats.elapsed_ms
         );
         eprintln!();
     }
 
-    if cli.show_sources {
-        print_sources(&result.corpus_hits, &result.web_results);
+    if cli.show_sources && !result.payload.sources.is_empty() {
+        eprintln!();
+        eprintln!("  {}", style("Sources").cyan().bold());
+        for s in &result.payload.sources {
+            eprintln!(
+                "    {}  {}  {}",
+                style(&s.id).dim(),
+                style(&s.title).bold(),
+                style(&s.url).dim()
+            );
+        }
     }
 
     if let Some(path) = &cli.output {
@@ -555,49 +566,29 @@ fn cmd_research(cli: &Cli, question: &str) -> Result<(), String> {
     if options.show_cost {
         eprintln!();
         display::section("Stats");
+        display::kv("use case", use_case.as_str());
         display::kv("model", &options.model);
         display::kv("provider", provider.name);
-        display::kv("sub-questions", &result.stats.sub_questions.to_string());
-        display::kv("search queries", &result.stats.search_queries.to_string());
-        display::kv("corpus chunks", &result.stats.corpus_chunks_retrieved.to_string());
-        display::kv("web results", &result.stats.web_results_retrieved.to_string());
-        display::kv("claims extracted", &result.stats.claims_extracted.to_string());
-        display::kv("claims verified", &result.stats.claims_verified.to_string());
-        let conf = exec.overall_confidence();
-        display::kv("overall confidence", &format!("{:.0}%", conf * 100.0));
+        display::kv("steps", &result.stats.steps.to_string());
+        display::kv("tool calls", &result.stats.tool_calls.to_string());
+        display::kv("corpus searches", &result.stats.corpus_searches.to_string());
+        display::kv("web searches", &result.stats.web_searches.to_string());
+        display::kv("fetches", &result.stats.fetches.to_string());
+        display::kv("findings", &result.payload.findings.len().to_string());
         display::kv("elapsed", &format!("{} ms", result.stats.elapsed_ms));
-        display::kv("tokens (in/out)", &format!("{} / {}", exec.input_tokens, exec.output_tokens));
-        display::kv("est. cost", &format!("${:.6}", result.stats.estimated_cost_usd));
+        display::kv(
+            "tokens (in/out)",
+            &format!(
+                "{} / {}",
+                result.stats.input_tokens, result.stats.output_tokens
+            ),
+        );
+        display::kv(
+            "est. cost",
+            &format!("${:.6}", result.stats.estimated_cost_usd),
+        );
     }
     Ok(())
-}
-
-fn print_sources(corpus: &[crate::search::SearchHit], web: &[crate::web::WebResult]) {
-    if corpus.is_empty() && web.is_empty() {
-        return;
-    }
-    eprintln!();
-    eprintln!("  {}", style("Sources").cyan().bold());
-    let mut n = 0;
-    for h in corpus {
-        n += 1;
-        eprintln!(
-            "    [{:>2}] score={:>5.2}  {}  {}",
-            n,
-            h.score,
-            style(&h.chunk.title).bold(),
-            style(&h.chunk.url).dim()
-        );
-    }
-    for w in web {
-        n += 1;
-        eprintln!(
-            "    [{:>2}] web  {}  {}",
-            n,
-            style(&w.title).bold(),
-            style(&w.url).dim()
-        );
-    }
 }
 
 fn cmd_corpus(action: CorpusAction) -> Result<(), String> {
@@ -616,8 +607,7 @@ fn cmd_corpus(action: CorpusAction) -> Result<(), String> {
         }
         CorpusAction::Add { path } => {
             let conn = corpus::open_db().map_err(|e| format!("open corpus: {e}"))?;
-            let n = corpus::ingest_seed_path(&conn, &path)
-                .map_err(|e| format!("ingest: {e}"))?;
+            let n = corpus::ingest_seed_path(&conn, &path).map_err(|e| format!("ingest: {e}"))?;
             display::ok(&format!("Ingested {n} chunks from {}", path.display()));
             Ok(())
         }
@@ -635,12 +625,10 @@ fn cmd_corpus(action: CorpusAction) -> Result<(), String> {
         CorpusAction::Crawl { url, source } => {
             let spinner = display::create_spinner(&format!("Crawling {url}..."));
             let source = source.unwrap_or_else(|| "crawl".to_string());
-            let chunks = corpus::crawl_url(&url, &source)
-                .map_err(|e| format!("crawl: {e}"))?;
+            let chunks = corpus::crawl_url(&url, &source).map_err(|e| format!("crawl: {e}"))?;
             spinner.finish_and_clear();
             let conn = corpus::open_db().map_err(|e| format!("open corpus: {e}"))?;
-            let n = corpus::ingest_raw(&conn, &chunks)
-                .map_err(|e| format!("ingest: {e}"))?;
+            let n = corpus::ingest_raw(&conn, &chunks).map_err(|e| format!("ingest: {e}"))?;
             display::ok(&format!("Added {n} chunks from {url}"));
             Ok(())
         }
@@ -648,8 +636,7 @@ fn cmd_corpus(action: CorpusAction) -> Result<(), String> {
             let url = url.unwrap_or_else(|| corpus::DEFAULT_SEED_URL.to_string());
             let spinner = display::create_spinner(&format!("Downloading seed from {url}..."));
             let dest = corpus::seed_path();
-            let n = corpus::download_seed(&url, &dest)
-                .map_err(|e| format!("download: {e}"))?;
+            let n = corpus::download_seed(&url, &dest).map_err(|e| format!("download: {e}"))?;
             spinner.finish_and_clear();
             display::ok(&format!("Ingested {n} chunks from {url}"));
             Ok(())
@@ -701,9 +688,18 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
             display::kv("show_cost", &cfg.show_cost.to_string());
             display::kv("cheap", &cfg.cheap.to_string());
             display::kv("corpus_dir", &cfg.corpus_dir);
-            display::kv("stored API keys", &format!("{} provider(s)", cfg.api_keys.len()));
-            display::kv("config file", &ScaffConfig::config_path().display().to_string());
-            display::kv("corpus DB", &ScaffConfig::corpus_db_path().display().to_string());
+            display::kv(
+                "stored API keys",
+                &format!("{} provider(s)", cfg.api_keys.len()),
+            );
+            display::kv(
+                "config file",
+                &ScaffConfig::config_path().display().to_string(),
+            );
+            display::kv(
+                "corpus DB",
+                &ScaffConfig::corpus_db_path().display().to_string(),
+            );
             Ok(())
         }
         ConfigAction::Set { key, value } => {
@@ -748,7 +744,10 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
 fn cmd_doctor() -> Result<(), String> {
     display::section("scaff doctor");
     display::kv("version", env!("CARGO_PKG_VERSION"));
-    display::kv("config file", &ScaffConfig::config_path().display().to_string());
+    display::kv(
+        "config file",
+        &ScaffConfig::config_path().display().to_string(),
+    );
 
     let cfg = ScaffConfig::load();
     let provider = config::resolve_provider(Some(&cfg.default_provider))?;
@@ -785,7 +784,10 @@ fn cmd_doctor() -> Result<(), String> {
             connectors::ConnectorKind::Web => "web",
             connectors::ConnectorKind::Local => "local",
         };
-        println!("  connector [{}] {} — {} {}", kind, c.name, badge, c.details);
+        println!(
+            "  connector [{}] {} — {} {}",
+            kind, c.name, badge, c.details
+        );
     }
 
     display::ok("doctor complete");
@@ -804,11 +806,17 @@ fn cmd_completions(shell: &str) -> Result<(), String> {
         "fish" => clap_complete::Shell::Fish,
         "powershell" => clap_complete::Shell::PowerShell,
         "elvish" => clap_complete::Shell::Elvish,
-        _ => return Err(format!("Unknown shell: {shell}. Valid: bash, zsh, fish, powershell, elvish")),
+        _ => {
+            return Err(format!(
+                "Unknown shell: {shell}. Valid: bash, zsh, fish, powershell, elvish"
+            ))
+        }
     };
     let mut buf: Vec<u8> = Vec::new();
     clap_complete::generate(shell_type, &mut app, "scaff", &mut buf);
-    std::io::stdout().write_all(&buf).map_err(|e| format!("{e}"))?;
+    std::io::stdout()
+        .write_all(&buf)
+        .map_err(|e| format!("{e}"))?;
     Ok(())
 }
 
@@ -845,9 +853,3 @@ fn truncate(s: &str, n: usize) -> String {
 
 #[allow(dead_code)]
 const _VERSION: &str = env!("CARGO_PKG_VERSION");
-
-// Re-export for the report renderer so the version constant resolves.
-#[allow(dead_code)]
-fn _render_unused() {
-    let _ = render::render_report;
-}
